@@ -778,7 +778,7 @@ def handle_message(message):
             pass
 
 # ============================================
-# ЗАПУСК НА RENDER (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# ЗАПУСК НА RENDER (С АВТОМАТИЧЕСКИМ ПЕРЕЗАПУСКОМ)
 # ============================================
 @app.route('/')
 def home():
@@ -791,38 +791,35 @@ def health():
 def run_bot():
     """Функция для запуска бота в отдельном потоке"""
     print("🚀 Бот ЗАПУСКАЕТСЯ...")
-    try:
-        # Удаляем вебхук (на всякий случай)
-        bot.remove_webhook()
-        time.sleep(1)
-        # Запускаем polling
-        print("✅ Бот начал polling...")
-        bot.infinity_polling()
-    except Exception as e:
-        print(f"❌ Ошибка бота: {e}")
-        time.sleep(5)
-        run_bot()  # Перезапускаем при ошибке
+    while True:  # Бесконечный цикл для перезапуска при ошибках
+        try:
+            print("🔄 Удаляем вебхук...")
+            bot.remove_webhook()
+            time.sleep(2)
+            print("✅ Бот начинает polling...")
+            bot.infinity_polling()
+        except Exception as e:
+            print(f"❌ Ошибка бота: {e}")
+            print("🔄 Перезапуск через 5 секунд...")
+            time.sleep(5)
+            continue
+        break
 
 if __name__ == '__main__':
     print("🔥 Запуск антиспам-бота на Render!")
     print(f"👑 Супер админ ID: {SUPER_ADMIN_ID}")
-    print(f"📌 Порт из окружения: {os.environ.get('PORT', 'не задан')}")
+    print(f"📌 Порт: {os.environ.get('PORT', '10000')}")
     
     # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.daemon = True
+    from threading import Thread
+    bot_thread = Thread(target=run_bot, daemon=True)
     bot_thread.start()
+    print("✅ Поток бота запущен")
     
-    # Даем боту время запуститься
+    # Даем боту время на инициализацию
     time.sleep(3)
-    print("✅ Бот запущен в фоне, теперь запускаем Flask...")
+    print("✅ Бот должен быть готов, запускаем Flask...")
     
-    # ЗАПУСКАЕМ ФЛАСК С ПРИНУДИТЕЛЬНЫМ ПРОСЛУШИВАНИЕМ
+    # Запускаем Flask
     port = int(os.environ.get('PORT', 10000))
-    print(f"🚀 Запускаем Flask на порту {port}...")
-    
-    # Важно! Используем host='0.0.0.0' и port
-    # Добавляем debug=False и use_reloader=False
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-    
-    print("❌ Если ты видишь это сообщение - Flask остановился!")
+    app.run(host='0.0.0.0', port=port, debug=False)
