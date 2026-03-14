@@ -778,7 +778,7 @@ def handle_message(message):
             pass
 
 # ============================================
-# ЗАПУСК НА RENDER
+# ЗАПУСК НА RENDER (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 # ============================================
 @app.route('/')
 def home():
@@ -789,22 +789,14 @@ def health():
     return "OK", 200
 
 def run_bot():
-    print("🚀 Бот запускается...")
-    try:
-        bot.infinity_polling()
-    except Exception as e:
-        print(f"❌ Ошибка бота: {e}")
-        time.sleep(5)
-        run_bot()
-
-def run_bot():
     """Функция для запуска бота в отдельном потоке"""
-    print("🚀 Бот запускается...")
+    print("🚀 Бот ЗАПУСКАЕТСЯ...")
     try:
         # Удаляем вебхук (на всякий случай)
         bot.remove_webhook()
         time.sleep(1)
         # Запускаем polling
+        print("✅ Бот начал polling...")
         bot.infinity_polling()
     except Exception as e:
         print(f"❌ Ошибка бота: {e}")
@@ -816,10 +808,15 @@ if __name__ == '__main__':
     print(f"👑 Супер админ ID: {SUPER_ADMIN_ID}")
     
     # Запускаем бота в отдельном потоке
-    from threading import Thread
-    bot_thread = Thread(target=run_bot)
+    bot_thread = threading.Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()
     
+    # Даем боту время запуститься
+    time.sleep(3)
+    print("✅ Бот запущен в фоне, теперь запускаем Flask...")
+    
     # Запускаем Flask сервер (чтобы Render думал что это веб-сервис)
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
+    # Используем порт из переменной окружения или 10000 по умолчанию
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
