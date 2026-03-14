@@ -541,7 +541,7 @@ def start(message):
 
 **👑 Админ команды:**
 /functions - вкл/выкл функции
-/settings - настройки
+/settings - настройки группы
 /logs - логи нарушений
 /mute [сек] - замутить (ответом)
 /unmute - размутить (ответом)
@@ -617,7 +617,7 @@ def settings_menu(message):
     settings = db.get_group_settings(chat_id)
     
     text = f"""
-⚙️ **ТЕКУЩИЕ НАСТРОЙКИ:**
+⚙️ **ТЕКУЩИЕ НАСТРОЙКИ ГРУППЫ:**
 
 📌 **ФЛУД:** {settings['max_messages']} за {settings['time_window']}с
 🔇 **КАПС:** >{settings['caps_limit']}%
@@ -651,16 +651,22 @@ def show_logs(message):
         bot.reply_to(message, "❌ Только админы!")
         return
     
-    logs = db.get_logs(chat_id, 10)
+    logs = db.get_logs(chat_id, 15)
     
     if not logs:
         bot.reply_to(message, "📝 **Логов пока нет**")
         return
     
-    text = "📋 **ПОСЛЕДНИЕ ДЕЙСТВИЯ:**\n\n"
+    text = "📋 **ПОСЛЕДНИЕ ДЕЙСТВИЯ В ГРУППЕ:**\n\n"
     for log in logs:
         emoji = "⚠️" if log['action'] == 'WARN' else "🔇" if log['action'] == 'MUTE' else "✅"
-        text += f"{emoji} @{log['username']}: {log['reason']}\n  ({log['timestamp'][:19]})\n"
+        # Форматируем время, убираем миллисекунды
+        time_str = log['timestamp'][:19] if log['timestamp'] else ""
+        text += f"{emoji} @{log['username']}: {log['reason']}\n   🕒 {time_str}\n\n"
+    
+    # Если текст слишком длинный, обрезаем
+    if len(text) > 3500:
+        text = text[:3500] + "\n\n... (лог обрезан)"
     
     bot.reply_to(message, text, parse_mode='Markdown')
 
@@ -868,7 +874,9 @@ def set_greeting(message):
 def set_max_msgs(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    if not is_admin(chat_id, user_id): return
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
     try:
         val = int(message.text.split()[1])
         if 1 <= val <= 20:
@@ -881,7 +889,9 @@ def set_max_msgs(message):
 def set_time(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    if not is_admin(chat_id, user_id): return
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
     try:
         val = int(message.text.split()[1])
         if 1 <= val <= 10:
@@ -894,7 +904,9 @@ def set_time(message):
 def set_caps(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    if not is_admin(chat_id, user_id): return
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
     try:
         val = int(message.text.split()[1])
         if 0 <= val <= 100:
@@ -907,7 +919,9 @@ def set_caps(message):
 def set_emoji(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    if not is_admin(chat_id, user_id): return
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
     try:
         val = int(message.text.split()[1])
         if 0 <= val <= 20:
@@ -920,7 +934,9 @@ def set_emoji(message):
 def set_link_kd(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    if not is_admin(chat_id, user_id): return
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
     try:
         val = int(message.text.split()[1])
         if 0 <= val <= 60:
@@ -933,7 +949,9 @@ def set_link_kd(message):
 def set_media_limit(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    if not is_admin(chat_id, user_id): return
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
     try:
         val = int(message.text.split()[1])
         if 1 <= val <= 10:
@@ -946,7 +964,9 @@ def set_media_limit(message):
 def set_warn_limit(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    if not is_admin(chat_id, user_id): return
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
     try:
         val = int(message.text.split()[1])
         if 1 <= val <= 10:
@@ -959,7 +979,9 @@ def set_warn_limit(message):
 def set_mute_time(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    if not is_admin(chat_id, user_id): return
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
     try:
         val = int(message.text.split()[1])
         if 10 <= val <= 3600:
@@ -972,7 +994,9 @@ def set_mute_time(message):
 def set_max_len(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
-    if not is_admin(chat_id, user_id): return
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
     try:
         val = int(message.text.split()[1])
         if 10 <= val <= 5000:
