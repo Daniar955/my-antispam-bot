@@ -777,90 +777,81 @@ def handle_message(message):
         except:
             pass
 
-## ============================================
-# ЗАПУСК НА RENDER (СУПЕР-ДИАГНОСТИКА)
+# ============================================
+# ЗАПУСК НА RENDER (ЧЕРЕЗ ВЕБХУКИ - САМЫЙ НАДЕЖНЫЙ)
 # ============================================
 
-# --- Flask endpoints ---
+import os
+import time
+from flask import Flask, request
+
+app = Flask(__name__)
+
+# --- Главная страница для проверки ---
 @app.route('/')
 def home():
     return "🔥 Антиспам бот работает! 🔥", 200
 
 @app.route('/health')
 def health():
-    # Тут мы можем добавить проверку, жив ли поток с ботом
-    if 'bot_thread' in globals() and bot_thread.is_alive():
-        return "OK (бот в потоке жив)", 200
+    return "OK", 200
+
+# --- Эндпоинт для вебхуков Telegram ---
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    """Принимает обновления от Telegram"""
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
     else:
-        # Если поток мертв, Render может решить перезапустить сервис
-        return "WARNING: Bot thread is not alive!", 500
+        return 'Wrong content type', 403
 
-# --- Функция запуска бота ---
-def run_bot():
-    """Функция для запуска бота в отдельном потоке"""
+# --- Функция настройки вебхука ---
+def set_webhook():
+    """Устанавливает вебхук для бота"""
     print("="*50)
-    print("🚀 [БОТ] Функция run_bot() ЗАПУЩЕНА!")
-    print("="*50)
-    print(f"🆔 [БОТ] ID потока: {threading.get_ident()}")
-    print(f"🤖 [БОТ] Используется токен: {TOKEN[:5]}...{TOKEN[-5:] if TOKEN else 'НЕТ ТОКЕНА'}")
+    print("🔄 Настройка вебхука...")
+    RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
+    if not RENDER_URL:
+        print("❌ Переменная RENDER_EXTERNAL_URL не найдена!")
+        return False
     
-    # Проверка соединения с Telegram перед запуском
+    webhook_url = f"{RENDER_URL}/{TOKEN}"
+    print(f"📌 URL вебхука: {webhook_url}")
+    
     try:
-        print("🔄 [БОТ] Пробуем получить информацию о боте (get_me)...")
+        # Удаляем старый вебхук
+        bot.remove_webhook()
+        time.sleep(1)
+        # Устанавливаем новый
+        bot.set_webhook(url=webhook_url)
+        print("✅ Вебхук успешно установлен!")
+        
+        # Проверяем информацию о боте
         me = bot.get_me()
-        print(f"✅ [БОТ] Успех! Бот @{me.username} (ID: {me.id}) подключен к API Telegram.")
+        print(f"✅ Бот @{me.username} (ID: {me.id}) подключен к Telegram API.")
+        return True
     except Exception as e:
-        print(f"❌ [БОТ] КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к Telegram API!")
-        print(f"❌ [БОТ] Тип ошибки: {type(e).__name__}")
-        print(f"❌ [БОТ] Текст ошибки: {e}")
-        print("❌ [БОТ] Возможные причины: неверный токен, проблемы с сетью, блокировка API.")
-        # Не будем выходить, попробуем запустить polling, но ошибка повторится
-        # return  # Раскомментируй, чтобы бот не пытался запускаться дальше
-
-    # Основной цикл с polling
-    while True:
-        try:
-            print("🔄 [БОТ] Удаляем вебхук (remove_webhook)...")
-            bot.remove_webhook()
-            time.sleep(2)
-            print("✅ [БОТ] Вебхук удален. Запускаем infinity_polling...")
-            # Запускаем polling. Эта функция будет работать, пока бот не упадет.
-            bot.infinity_polling()
-        except Exception as e:
-            print(f"❌ [БОТ] Ошибка внутри polling: {e}")
-            print("🔄 [БОТ] Перезапуск через 10 секунд...")
-            time.sleep(10)
-            continue  # Перезапустим цикл и попробуем снова
-        break  # Выход из цикла, если polling завершился без ошибок (такого не должно быть)
+        print(f"❌ Ошибка установки вебхука: {e}")
+        return False
 
 # --- Главный блок запуска ---
 if __name__ == '__main__':
     print("="*50)
-    print("🔥 ЗАПУСК ГЛАВНОГО БЛОКА")
+    print("🔥 ЗАПУСК АНТИСПАМ-БОТА (ЧЕРЕЗ ВЕБХУКИ)")
     print("="*50)
     print(f"👑 Супер админ ID: {SUPER_ADMIN_ID}")
-    print(f"📌 Порт из окружения: {os.environ.get('PORT', 'НЕ ЗАДАН (будет 10000)')}")
     
-    # Запускаем бота в отдельном потоке
-    from threading import Thread
-    print("🔄 Создаем поток для бота...")
-    bot_thread = Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    print(f"✅ Поток бота создан и запущен. ID потока: {bot_thread.ident}")
-    
-    # Даем боту время на инициализацию
-    print("⏳ Ожидание 5 секунд для инициализации бота...")
-    time.sleep(5)
-    
-    # Проверяем, жив ли поток бота после инициализации
-    if bot_thread.is_alive():
-        print("✅ Поток бота ЖИВ после инициализации.")
+    # Устанавливаем вебхук перед запуском Flask
+    if set_webhook():
+        print("✅ Бот готов к работе через вебхуки!")
     else:
-        print("❌ КРИТИЧНО: Поток бота УЖЕ МЕРТВ после инициализации!")
+        print("⚠️ Не удалось установить вебхук, но Flask все равно запустится.")
     
     # Запускаем Flask
     port = int(os.environ.get('PORT', 10000))
-    print(f"🚀 Запускаем Flask сервер на порту {port}...")
+    print(f"🚀 Запуск Flask сервера на порту {port}...")
     print("="*50)
-    # Важно: use_reloader=False, чтобы Flask не создавал дочерние процессы
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=port, debug=False)
