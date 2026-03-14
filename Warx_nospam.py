@@ -777,49 +777,90 @@ def handle_message(message):
         except:
             pass
 
+## ============================================
+# ЗАПУСК НА RENDER (СУПЕР-ДИАГНОСТИКА)
 # ============================================
-# ЗАПУСК НА RENDER (С АВТОМАТИЧЕСКИМ ПЕРЕЗАПУСКОМ)
-# ============================================
+
+# --- Flask endpoints ---
 @app.route('/')
 def home():
     return "🔥 Антиспам бот работает! 🔥", 200
 
 @app.route('/health')
 def health():
-    return "OK", 200
+    # Тут мы можем добавить проверку, жив ли поток с ботом
+    if 'bot_thread' in globals() and bot_thread.is_alive():
+        return "OK (бот в потоке жив)", 200
+    else:
+        # Если поток мертв, Render может решить перезапустить сервис
+        return "WARNING: Bot thread is not alive!", 500
 
+# --- Функция запуска бота ---
 def run_bot():
     """Функция для запуска бота в отдельном потоке"""
-    print("🚀 Бот ЗАПУСКАЕТСЯ...")
-    while True:  # Бесконечный цикл для перезапуска при ошибках
+    print("="*50)
+    print("🚀 [БОТ] Функция run_bot() ЗАПУЩЕНА!")
+    print("="*50)
+    print(f"🆔 [БОТ] ID потока: {threading.get_ident()}")
+    print(f"🤖 [БОТ] Используется токен: {TOKEN[:5]}...{TOKEN[-5:] if TOKEN else 'НЕТ ТОКЕНА'}")
+    
+    # Проверка соединения с Telegram перед запуском
+    try:
+        print("🔄 [БОТ] Пробуем получить информацию о боте (get_me)...")
+        me = bot.get_me()
+        print(f"✅ [БОТ] Успех! Бот @{me.username} (ID: {me.id}) подключен к API Telegram.")
+    except Exception as e:
+        print(f"❌ [БОТ] КРИТИЧЕСКАЯ ОШИБКА: Не удалось подключиться к Telegram API!")
+        print(f"❌ [БОТ] Тип ошибки: {type(e).__name__}")
+        print(f"❌ [БОТ] Текст ошибки: {e}")
+        print("❌ [БОТ] Возможные причины: неверный токен, проблемы с сетью, блокировка API.")
+        # Не будем выходить, попробуем запустить polling, но ошибка повторится
+        # return  # Раскомментируй, чтобы бот не пытался запускаться дальше
+
+    # Основной цикл с polling
+    while True:
         try:
-            print("🔄 Удаляем вебхук...")
+            print("🔄 [БОТ] Удаляем вебхук (remove_webhook)...")
             bot.remove_webhook()
             time.sleep(2)
-            print("✅ Бот начинает polling...")
+            print("✅ [БОТ] Вебхук удален. Запускаем infinity_polling...")
+            # Запускаем polling. Эта функция будет работать, пока бот не упадет.
             bot.infinity_polling()
         except Exception as e:
-            print(f"❌ Ошибка бота: {e}")
-            print("🔄 Перезапуск через 5 секунд...")
-            time.sleep(5)
-            continue
-        break
+            print(f"❌ [БОТ] Ошибка внутри polling: {e}")
+            print("🔄 [БОТ] Перезапуск через 10 секунд...")
+            time.sleep(10)
+            continue  # Перезапустим цикл и попробуем снова
+        break  # Выход из цикла, если polling завершился без ошибок (такого не должно быть)
 
+# --- Главный блок запуска ---
 if __name__ == '__main__':
-    print("🔥 Запуск антиспам-бота на Render!")
+    print("="*50)
+    print("🔥 ЗАПУСК ГЛАВНОГО БЛОКА")
+    print("="*50)
     print(f"👑 Супер админ ID: {SUPER_ADMIN_ID}")
-    print(f"📌 Порт: {os.environ.get('PORT', '10000')}")
+    print(f"📌 Порт из окружения: {os.environ.get('PORT', 'НЕ ЗАДАН (будет 10000)')}")
     
     # Запускаем бота в отдельном потоке
     from threading import Thread
+    print("🔄 Создаем поток для бота...")
     bot_thread = Thread(target=run_bot, daemon=True)
     bot_thread.start()
-    print("✅ Поток бота запущен")
+    print(f"✅ Поток бота создан и запущен. ID потока: {bot_thread.ident}")
     
     # Даем боту время на инициализацию
-    time.sleep(3)
-    print("✅ Бот должен быть готов, запускаем Flask...")
+    print("⏳ Ожидание 5 секунд для инициализации бота...")
+    time.sleep(5)
+    
+    # Проверяем, жив ли поток бота после инициализации
+    if bot_thread.is_alive():
+        print("✅ Поток бота ЖИВ после инициализации.")
+    else:
+        print("❌ КРИТИЧНО: Поток бота УЖЕ МЕРТВ после инициализации!")
     
     # Запускаем Flask
     port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    print(f"🚀 Запускаем Flask сервер на порту {port}...")
+    print("="*50)
+    # Важно: use_reloader=False, чтобы Flask не создавал дочерние процессы
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
