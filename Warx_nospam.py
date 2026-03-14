@@ -797,14 +797,29 @@ def run_bot():
         time.sleep(5)
         run_bot()
 
+def run_bot():
+    """Функция для запуска бота в отдельном потоке"""
+    print("🚀 Бот запускается...")
+    try:
+        # Удаляем вебхук (на всякий случай)
+        bot.remove_webhook()
+        time.sleep(1)
+        # Запускаем polling
+        bot.infinity_polling()
+    except Exception as e:
+        print(f"❌ Ошибка бота: {e}")
+        time.sleep(5)
+        run_bot()  # Перезапускаем при ошибке
+
 if __name__ == '__main__':
     print("🔥 Запуск антиспам-бота на Render!")
     print(f"👑 Супер админ ID: {SUPER_ADMIN_ID}")
     
     # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot)
+    from threading import Thread
+    bot_thread = Thread(target=run_bot)
     bot_thread.daemon = True
     bot_thread.start()
     
-    # Запускаем Flask сервер
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    # Запускаем Flask сервер (чтобы Render думал что это веб-сервис)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
