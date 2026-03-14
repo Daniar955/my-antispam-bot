@@ -839,4 +839,153 @@ def set_mute_time(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id): return
-    try
+    try:
+        val = int(message.text.split()[1])
+        if 10 <= val <= 3600:
+            db.update_setting(chat_id, 'mute_time', val)
+            bot.reply_to(message, f"✅ Время мута: {val} сек")
+    except:
+        bot.reply_to(message, "❌ /set_mute_time [10-3600]")
+
+@bot.message_handler(commands=['set_max_len'])
+def set_max_len(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id): return
+    try:
+        val = int(message.text.split()[1])
+        if 10 <= val <= 5000:
+            db.update_setting(chat_id, 'max_length', val)
+            bot.reply_to(message, f"✅ Макс длина: {val} симв.")
+    except:
+        bot.reply_to(message, "❌ /set_max_len [10-5000]")
+
+@bot.message_handler(commands=['antispam_on'])
+def antispam_on(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    db.update_setting(chat_id, 'enabled', 1)
+    bot.reply_to(message, "🟢 **АНТИСПАМ ВКЛЮЧЕН!**", parse_mode='Markdown')
+
+@bot.message_handler(commands=['antispam_off'])
+def antispam_off(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    db.update_setting(chat_id, 'enabled', 0)
+    bot.reply_to(message, "🔴 **АНТИСПАМ ВЫКЛЮЧЕН!**", parse_mode='Markdown')
+
+# ============================================
+# CALLBACK HANDLERS
+# ============================================
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.answer_callback_query(call.id, "❌ Только админы!")
+        return
+    
+    if call.data.startswith('toggle_'):
+        function = call.data.replace('toggle_', '') + '_enabled'
+        new_state = db.toggle_function(chat_id, function)
+        status = "✅ ВКЛ" if new_state else "❌ ВЫКЛ"
+        bot.answer_callback_query(call.id, f"Функция {status}")
+        
+        # Обновляем меню
+        functions_menu(call.message)
+    
+    elif call.data == "main_menu":
+        bot.edit_message_text(
+            "🔧 **ГЛАВНОЕ МЕНЮ**\n/functions - управление функциями\n/settings - настройки",
+            chat_id,
+            call.message.message_id,
+            parse_mode='Markdown'
+        )
+
+# ============================================
+# ОБРАБОТЧИКИ СООБЩЕНИЙ
+# ============================================
+@bot.message_handler(content_types=['new_chat_members'])
+def welcome_new(message):
+    chat_id = message.chat.id
+    settings = db.get_group_settings(chat_id)
+    
+    for member in message.new_chat_members:
+        if member.id == bot.get_me().id:
+            bot.reply_to(message, 
+                "🤖 **ULTIMATE АНТИСПАМ АКТИВИРОВАН!**\n"
+                "👑 /functions - управление функциями",
+                parse_mode='Markdown'
+            )
+            creator = message.from_user
+            db.add_group_admin(chat_id, creator.id, creator.username or "Creator", SUPER_ADMIN_ID)
+        
+        elif settings['welcome_enabled']:
+            greeting = db.get_greeting(chat_id)
+            greeting = greeting.replace('{user}', f"@{member.username or member.first_name}")
+            bot.reply_to(message, greeting, parse_mode='Markdown')
+
+@bot.message_handler(content_types=['text', 'photo', 'video', 'document'])
+def handle_message(message):
+    if message.text and message.text.startswith('/'):
+        return
+    
+    if message.chat.type == 'private':
+        bot.reply_to(message, "🤖 Добавь меня в группу!")
+        return
+    
+    # Проверяем на спам
+    is_allowed, warning = spam_filter.check_message(message)
+    
+    if not is_allowed and warning:
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+            bot.send_message(message.chat.id, warning)
+        except:
+            pass
+
+# ============================================
+# ЗАПУСК НА RENDER
+# ============================================
+@app.route('/')
+def home():
+    return "🔥 ULTIMATE ANTISPAM БОТ РАБОТАЕТ! 🔥", 200
+
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    return 'Wrong content type', 403
+
+def set_webhook():
+    print("🔄 Настройка вебхука...")
+    RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
+    if not RENDER_URL:
+        print("❌ Нет RENDER_EXTERNAL_URL!")
+        return False
+    
+    webhook_url = f"{RENDER_URL}/{TOKEN}"
+    bot.remove_webhook()
+    time.sleep(1)
+    bot.set_webhook(url=webhook_url)
+    
+    me = bot.get_me()
+    print(f"✅ Бот @{me.username} запущен!")
+    return True
+
+if __name__ == '__main__':
+    print("🔥 ЗАПУСК ULTIMATE ANTISPAM БОТА")
+    set_webhook()
+    
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
