@@ -69,7 +69,7 @@ class Database:
                 auto_mute BOOLEAN DEFAULT 1,
                 mute_time INTEGER DEFAULT 60,  -- секунд
                 
-                -- ДРУГОЕ (ТОЛЬКО МАКСИМУМ)
+                -- ДРУГОЕ
                 max_length INTEGER DEFAULT 1000
             )
         ''')
@@ -230,6 +230,35 @@ class Database:
         
         return new_warns, None
     
+    def mute_user(self, chat_id, user_id, username, seconds, reason="Ручной мут"):
+        """Ручной мут пользователя"""
+        mute_until = datetime.now() + timedelta(seconds=seconds)
+        
+        offender = self.get_offender(chat_id, user_id)
+        if offender:
+            self.cursor.execute('''
+                UPDATE offenders SET muted_until = ?, last_offense = ?, username = ?
+                WHERE chat_id = ? AND user_id = ?
+            ''', (mute_until, datetime.now(), username, chat_id, user_id))
+        else:
+            self.cursor.execute('''
+                INSERT INTO offenders (chat_id, user_id, username, warns, last_offense, join_time, muted_until)
+                VALUES (?, ?, ?, 0, ?, ?, ?)
+            ''', (chat_id, user_id, username, datetime.now(), datetime.now(), mute_until))
+        
+        self.log_action(chat_id, user_id, username, 'MUTE', f"{reason} на {seconds} сек")
+        self.conn.commit()
+        return mute_until
+    
+    def unmute_user(self, chat_id, user_id):
+        """Снять мут"""
+        self.cursor.execute('''
+            UPDATE offenders SET muted_until = NULL 
+            WHERE chat_id = ? AND user_id = ?
+        ''', (chat_id, user_id))
+        self.log_action(chat_id, user_id, "unknown", 'UNMUTE', "Снятие мута")
+        self.conn.commit()
+    
     def get_offender(self, chat_id, user_id):
         self.cursor.execute('SELECT * FROM offenders WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
         result = self.cursor.fetchone()
@@ -245,7 +274,8 @@ class Database:
         return False
     
     def reset_warns(self, chat_id, user_id):
-        self.cursor.execute('DELETE FROM offenders WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
+        self.cursor.execute('UPDATE offenders SET warns = 0 WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
+        self.unmute_user(chat_id, user_id)
         self.conn.commit()
     
     def log_action(self, chat_id, user_id, username, action, reason):
@@ -489,6 +519,9 @@ spam_filter = UltimateAntiSpam()
 def is_admin(chat_id, user_id):
     return db.is_group_admin(chat_id, user_id)
 
+def get_username(user):
+    return user.username or user.first_name or f"user_{user.id}"
+
 @bot.message_handler(commands=['start'])
 def start(message):
     text = """
@@ -504,11 +537,15 @@ def start(message):
 • 📸 Медиа-флуд
 • 👋 Приветствие
 • 🔨 Авто-мут
+• 👑 Ручной мут (/mute)
 
 **👑 Админ команды:**
 /functions - вкл/выкл функции
 /settings - настройки
 /logs - логи нарушений
+/mute [сек] - замутить (ответом)
+/unmute - размутить (ответом)
+/reset_warns - сбросить варны (ответом)
 /add_admin - добавить админа
     """
     bot.reply_to(message, text, parse_mode='Markdown')
@@ -620,11 +657,77 @@ def show_logs(message):
         bot.reply_to(message, "📝 **Логов пока нет**")
         return
     
-    text = "📋 **ПОСЛЕДНИЕ НАРУШЕНИЯ:**\n\n"
+    text = "📋 **ПОСЛЕДНИЕ ДЕЙСТВИЯ:**\n\n"
     for log in logs:
-        text += f"• @{log['username']}: {log['reason']}\n  ({log['timestamp'][:19]})\n"
+        emoji = "⚠️" if log['action'] == 'WARN' else "🔇" if log['action'] == 'MUTE' else "✅"
+        text += f"{emoji} @{log['username']}: {log['reason']}\n  ({log['timestamp'][:19]})\n"
     
     bot.reply_to(message, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['mute'])
+def mute_command(message):
+    """Ручной мут пользователя"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя, которого хочешь замутить!")
+        return
+    
+    try:
+        # Парсим время из команды
+        parts = message.text.split()
+        if len(parts) < 2:
+            seconds = 60  # По умолчанию 60 секунд
+        else:
+            seconds = int(parts[1])
+            if seconds < 1:
+                seconds = 60
+            if seconds > 86400:  # Не больше 24 часов
+                seconds = 86400
+        
+        target = message.reply_to_message.from_user
+        target_name = get_username(target)
+        
+        # Мутим
+        mute_until = db.mute_user(chat_id, target.id, target_name, seconds, f"Ручной мут от @{get_username(message.from_user)}")
+        
+        # Отправляем уведомление
+        bot.reply_to(message, f"🔇 **Пользователь @{target_name} замучен на {seconds} сек!**")
+        
+        # Удаляем сообщение нарушителя (опционально)
+        try:
+            bot.delete_message(chat_id, message.reply_to_message.message_id)
+        except:
+            pass
+            
+    except ValueError:
+        bot.reply_to(message, "❌ Неправильный формат! Используй: /mute [секунды]")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(commands=['unmute'])
+def unmute_command(message):
+    """Снять мут"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
+        return
+    
+    target = message.reply_to_message.from_user
+    db.unmute_user(chat_id, target.id)
+    
+    bot.reply_to(message, f"✅ **@{get_username(target)} размучен!**")
 
 @bot.message_handler(commands=['add_admin'])
 def add_admin(message):
@@ -640,8 +743,8 @@ def add_admin(message):
         return
     
     new_admin = message.reply_to_message.from_user
-    db.add_group_admin(chat_id, new_admin.id, new_admin.username or "NoName", user_id)
-    bot.reply_to(message, f"✅ @{new_admin.username or 'NoName'} теперь админ!")
+    db.add_group_admin(chat_id, new_admin.id, get_username(new_admin), user_id)
+    bot.reply_to(message, f"✅ @{get_username(new_admin)} теперь админ!")
 
 @bot.message_handler(commands=['remove_admin'])
 def remove_admin(message):
@@ -658,7 +761,7 @@ def remove_admin(message):
     
     admin = message.reply_to_message.from_user
     db.remove_group_admin(chat_id, admin.id)
-    bot.reply_to(message, f"✅ @{admin.username or 'NoName'} больше не админ")
+    bot.reply_to(message, f"✅ @{get_username(admin)} больше не админ")
 
 @bot.message_handler(commands=['admins'])
 def list_admins(message):
@@ -670,11 +773,29 @@ def list_admins(message):
         bot.reply_to(message, "📝 Админов пока нет")
         return
     
-    text = "👑 **АДМИНЫ:**\n"
+    text = "👑 **АДМИНЫ БОТА:**\n"
     for admin in admins:
         text += f"• @{admin['username']}\n"
     
     bot.reply_to(message, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['reset_warns'])
+def reset_warns(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
+        return
+    
+    target = message.reply_to_message.from_user
+    db.reset_warns(chat_id, target.id)
+    
+    bot.reply_to(message, f"✅ Предупреждения сброшены для @{get_username(target)}")
 
 @bot.message_handler(commands=['add_banword'])
 def add_banword(message):
@@ -688,7 +809,7 @@ def add_banword(message):
     try:
         word = message.text.split()[1].lower()
         db.add_ban_word(chat_id, word, user_id)
-        bot.reply_to(message, f"🚫 Слово '{word}' добавлено!")
+        bot.reply_to(message, f"🚫 Слово '{word}' добавлено в бан-лист!")
     except:
         bot.reply_to(message, "❌ Использование: /add_banword слово")
 
@@ -704,7 +825,7 @@ def remove_banword(message):
     try:
         word = message.text.split()[1].lower()
         db.remove_ban_word(chat_id, word)
-        bot.reply_to(message, f"✅ Слово '{word}' удалено!")
+        bot.reply_to(message, f"✅ Слово '{word}' удалено из бан-листа!")
     except:
         bot.reply_to(message, "❌ Использование: /remove_banword слово")
 
@@ -903,7 +1024,7 @@ def handle_callback(call):
     
     elif call.data == "main_menu":
         bot.edit_message_text(
-            "🔧 **ГЛАВНОЕ МЕНЮ**\n/functions - управление функциями\n/settings - настройки",
+            "🔧 **ГЛАВНОЕ МЕНЮ**\n/functions - управление функциями\n/settings - настройки\n/logs - логи\n/mute - ручной мут",
             chat_id,
             call.message.message_id,
             parse_mode='Markdown'
@@ -921,15 +1042,16 @@ def welcome_new(message):
         if member.id == bot.get_me().id:
             bot.reply_to(message, 
                 "🤖 **ULTIMATE АНТИСПАМ АКТИВИРОВАН!**\n"
-                "👑 /functions - управление функциями",
+                "👑 /functions - управление функциями\n"
+                "🔨 /mute - ручной мут",
                 parse_mode='Markdown'
             )
             creator = message.from_user
-            db.add_group_admin(chat_id, creator.id, creator.username or "Creator", SUPER_ADMIN_ID)
+            db.add_group_admin(chat_id, creator.id, get_username(creator), SUPER_ADMIN_ID)
         
         elif settings['welcome_enabled']:
             greeting = db.get_greeting(chat_id)
-            greeting = greeting.replace('{user}', f"@{member.username or member.first_name}")
+            greeting = greeting.replace('{user}', f"@{get_username(member)}")
             bot.reply_to(message, greeting, parse_mode='Markdown')
 
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document'])
