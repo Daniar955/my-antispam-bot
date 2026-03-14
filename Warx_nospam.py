@@ -806,6 +806,7 @@ def run_bot():
 if __name__ == '__main__':
     print("🔥 Запуск антиспам-бота на Render!")
     print(f"👑 Супер админ ID: {SUPER_ADMIN_ID}")
+    print(f"📌 Порт из окружения: {os.environ.get('PORT', 'не задан')}")
     
     # Запускаем бота в отдельном потоке
     bot_thread = threading.Thread(target=run_bot)
@@ -816,7 +817,12 @@ if __name__ == '__main__':
     time.sleep(3)
     print("✅ Бот запущен в фоне, теперь запускаем Flask...")
     
-    # Запускаем Flask сервер (чтобы Render думал что это веб-сервис)
-    # Используем порт из переменной окружения или 10000 по умолчанию
+    # ЗАПУСКАЕМ ФЛАСК С ПРИНУДИТЕЛЬНЫМ ПРОСЛУШИВАНИЕМ
     port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    print(f"🚀 Запускаем Flask на порту {port}...")
+    
+    # Важно! Используем host='0.0.0.0' и port
+    # Добавляем debug=False и use_reloader=False
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    
+    print("❌ Если ты видишь это сообщение - Flask остановился!")
