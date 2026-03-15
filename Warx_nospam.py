@@ -33,6 +33,7 @@ class Database:
         print("✅ База данных подключена")
     
     def create_tables(self):
+        # Таблица настроек групп
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_settings (
                 chat_id INTEGER PRIMARY KEY,
@@ -59,6 +60,7 @@ class Database:
             )
         ''')
         
+        # Таблица админов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_admins (
                 chat_id INTEGER,
@@ -70,6 +72,7 @@ class Database:
             )
         ''')
         
+        # Таблица нарушителей
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS offenders (
                 chat_id INTEGER,
@@ -86,6 +89,7 @@ class Database:
             )
         ''')
         
+        # Таблица запрещенных слов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS ban_words (
                 chat_id INTEGER,
@@ -95,6 +99,7 @@ class Database:
             )
         ''')
         
+        # Таблица логов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,6 +112,7 @@ class Database:
             )
         ''')
         
+        # Таблица приветствий
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS greetings (
                 chat_id INTEGER PRIMARY KEY,
@@ -151,10 +157,12 @@ class Database:
             VALUES (?, ?, ?, ?, ?)
         ''', (chat_id, user_id, username, added_by, datetime.now()))
         self.conn.commit()
+        print(f"✅ Админ {username} добавлен в группу {chat_id}")
     
     def remove_group_admin(self, chat_id, user_id):
         self.cursor.execute('DELETE FROM group_admins WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
         self.conn.commit()
+        print(f"✅ Админ удален из группы {chat_id}")
     
     def get_group_admins(self, chat_id):
         self.cursor.execute('SELECT * FROM group_admins WHERE chat_id = ?', (chat_id,))
@@ -172,10 +180,12 @@ class Database:
             VALUES (?, ?, ?)
         ''', (chat_id, word.lower(), added_by))
         self.conn.commit()
+        print(f"✅ Слово '{word}' добавлено в бан-лист")
     
     def remove_ban_word(self, chat_id, word):
         self.cursor.execute('DELETE FROM ban_words WHERE chat_id = ? AND word = ?', (chat_id, word.lower()))
         self.conn.commit()
+        print(f"✅ Слово '{word}' удалено из бан-листа")
     
     def add_warn(self, chat_id, user_id, username, reason):
         offender = self.get_offender(chat_id, user_id)
@@ -252,6 +262,7 @@ class Database:
                           (datetime.now(), chat_id, user_id))
         self.unmute_user(chat_id, user_id)
         self.conn.commit()
+        print(f"✅ Предупреждения сброшены для пользователя {user_id} в группе {chat_id}")
     
     def log_action(self, chat_id, user_id, username, action, reason):
         self.cursor.execute('''
@@ -274,6 +285,7 @@ class Database:
             INSERT OR REPLACE INTO greetings (chat_id, message) VALUES (?, ?)
         ''', (chat_id, message))
         self.conn.commit()
+        print(f"✅ Приветствие для группы {chat_id} установлено")
     
     def get_greeting(self, chat_id):
         self.cursor.execute('SELECT message FROM greetings WHERE chat_id = ?', (chat_id,))
@@ -452,6 +464,7 @@ def start(message):
 /reset_warns - сбросить варны
 /add_admin - добавить админа
 /admins - список админов
+/fix - принудительно стать админом
     """
     bot.reply_to(message, text, parse_mode='Markdown')
 
@@ -484,6 +497,9 @@ def functions_menu(message):
     
     bot.reply_to(message, "🔧 **УПРАВЛЕНИЕ ФУНКЦИЯМИ**\nНажми чтобы вкл/выкл:", reply_markup=markup, parse_mode='Markdown')
 
+# ============================================
+# ИСПРАВЛЕННАЯ КОМАНДА SETTINGS
+# ============================================
 @bot.message_handler(commands=['settings'])
 def settings_command(message):
     """Показать настройки группы"""
@@ -498,25 +514,28 @@ def settings_command(message):
         settings = db.get_group_settings(chat_id)
         mute_minutes = settings['mute_time'] // 60
         
-        # Проверяем наличие всех ключей
+        # Функция экранирования спецсимволов Markdown
+        def escape_md(text):
+            return str(text).replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
+        
         text = f"""
 ⚙️ **НАСТРОЙКИ ГРУППЫ** ⚙️
 
 📌 **ОСНОВНЫЕ:**
-• Флуд: {settings.get('max_messages', 4)} за {settings.get('time_window', 3)} сек
-• Капс: >{settings.get('caps_limit', 50)}%
-• Эмодзи: >{settings.get('emoji_limit', 5)}
-• Ссылки: кд {settings.get('link_kd', 10)} мин
-• Медиа: {settings.get('media_limit', 3)} за 5 сек
+• Флуд: {escape_md(settings.get('max_messages', 4))} за {escape_md(settings.get('time_window', 3))} сек
+• Капс: >{escape_md(settings.get('caps_limit', 50))}%
+• Эмодзи: >{escape_md(settings.get('emoji_limit', 5))}
+• Ссылки: кд {escape_md(settings.get('link_kd', 10))} мин
+• Медиа: {escape_md(settings.get('media_limit', 3))} за 5 сек
 
 🔨 **НАКАЗАНИЯ:**
-• Лимит варнов: {settings.get('warn_limit', 5)}
-• Время мута: {mute_minutes} мин
-• Авто-сброс варнов: через {settings.get('warn_reset_time', 24)} ч
+• Лимит варнов: {escape_md(settings.get('warn_limit', 5))}
+• Время мута: {escape_md(mute_minutes)} мин
+• Авто-сброс варнов: через {escape_md(settings.get('warn_reset_time', 24))} ч
 • Авто-мут: {'✅' if settings.get('auto_mute', True) else '❌'}
 
 📏 **ДРУГОЕ:**
-• Макс длина: {settings.get('max_length', 1000)} симв.
+• Макс длина: {escape_md(settings.get('max_length', 1000))} симв.
 • Статус антиспама: {'✅ Вкл' if settings.get('enabled', True) else '❌ Выкл'}
 
 **📝 КОМАНДЫ ДЛЯ ИЗМЕНЕНИЯ:**
@@ -534,7 +553,47 @@ def settings_command(message):
         """
         bot.reply_to(message, text, parse_mode='Markdown')
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка при получении настроек: {e}")
+        # Запасной вариант без Markdown
+        try:
+            settings = db.get_group_settings(chat_id)
+            mute_minutes = settings['mute_time'] // 60
+            
+            text = f"""
+⚙️ НАСТРОЙКИ ГРУППЫ ⚙️
+
+📌 ОСНОВНЫЕ:
+• Флуд: {settings.get('max_messages', 4)} за {settings.get('time_window', 3)} сек
+• Капс: >{settings.get('caps_limit', 50)}%
+• Эмодзи: >{settings.get('emoji_limit', 5)}
+• Ссылки: кд {settings.get('link_kd', 10)} мин
+• Медиа: {settings.get('media_limit', 3)} за 5 сек
+
+🔨 НАКАЗАНИЯ:
+• Лимит варнов: {settings.get('warn_limit', 5)}
+• Время мута: {mute_minutes} мин
+• Авто-сброс варнов: через {settings.get('warn_reset_time', 24)} ч
+• Авто-мут: {'✅ Вкл' if settings.get('auto_mute', True) else '❌ Выкл'}
+
+📏 ДРУГОЕ:
+• Макс длина: {settings.get('max_length', 1000)} симв.
+• Статус антиспама: {'✅ Вкл' if settings.get('enabled', True) else '❌ Выкл'}
+
+📝 КОМАНДЫ ДЛЯ ИЗМЕНЕНИЯ:
+/set_max_msgs [1-20]
+/set_time [1-10]
+/set_caps [0-100]
+/set_emoji [0-20]
+/set_link_kd [0-60]
+/set_media_limit [1-10]
+/set_warn_limit [1-10]
+/set_mute_time [1-60] (МИНУТЫ)
+/set_max_len [10-5000]
+/set_warn_reset [1-168] (часов)
+/greeting [текст]
+            """
+            bot.reply_to(message, text, parse_mode=None)
+        except Exception as e2:
+            bot.reply_to(message, f"❌ Ошибка при получении настроек: {e2}")
 
 @bot.message_handler(commands=['logs'])
 def show_logs(message):
@@ -580,7 +639,10 @@ def mute_command(message):
         mute_until = db.mute_user(chat_id, target.id, target_name, minutes, 
                                   f"Ручной мут от @{get_username(message.from_user)}")
         
-        bot.reply_to(message, f"🔇 @{target_name} замучен на {minutes} мин!")
+        # Форматируем время окончания мута
+        mute_time_str = mute_until.strftime("%H:%M %d.%m.%Y")
+        
+        bot.reply_to(message, f"🔇 @{target_name} замучен на {minutes} мин!\n⏱️ До: {mute_time_str}")
         
         try:
             bot.delete_message(chat_id, message.reply_to_message.message_id)
@@ -910,6 +972,20 @@ def antispam_off(message):
     bot.reply_to(message, "🔴 **АНТИСПАМ ВЫКЛЮЧЕН!**", parse_mode='Markdown')
 
 # ============================================
+# АВАРИЙНАЯ КОМАНДА FIX
+# ============================================
+@bot.message_handler(commands=['fix'])
+def fix_admin(message):
+    """Принудительно сделать админом"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    username = get_username(message.from_user)
+    
+    # Добавляем в базу принудительно
+    db.add_group_admin(chat_id, user_id, username, SUPER_ADMIN_ID)
+    bot.reply_to(message, f"✅ @{username} принудительно добавлен в админы! Теперь все команды должны работать.")
+
+# ============================================
 # CALLBACK HANDLERS
 # ============================================
 @bot.callback_query_handler(func=lambda call: True)
@@ -948,7 +1024,8 @@ def welcome_new(message):
                 "🤖 **IMBA АНТИСПАМ АКТИВИРОВАН!**\n"
                 "👑 /functions - управление\n"
                 "🔨 /mute - ручной мут\n"
-                "⚙️ /settings - настройки",
+                "⚙️ /settings - настройки\n"
+                "🆘 /fix - если не работают команды",
                 parse_mode='Markdown'
             )
             creator = message.from_user
@@ -975,16 +1052,7 @@ def handle_message(message):
             bot.send_message(message.chat.id, warning)
         except:
             pass
-@bot.message_handler(commands=['fix'])
-def fix_admin(message):
-    """Принудительно сделать админом"""
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    username = message.from_user.username or "user"
-    
-    # Добавляем в базу принудительно
-    db.add_group_admin(chat_id, user_id, username, 0)
-    bot.reply_to(message, f"✅ Ты принудительно добавлен в админы! Перезапусти бота.")
+
 # ============================================
 # ЗАПУСК НА RENDER
 # ============================================
