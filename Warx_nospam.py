@@ -22,7 +22,7 @@ bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
 # ============================================
-# БАЗА ДАННЫХ (ВСЁ СОХРАНЯЕТСЯ)
+# БАЗА ДАННЫХ
 # ============================================
 class Database:
     def __init__(self):
@@ -33,7 +33,6 @@ class Database:
         print("✅ База данных подключена")
     
     def create_tables(self):
-        # Таблица настроек групп
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_settings (
                 chat_id INTEGER PRIMARY KEY,
@@ -60,7 +59,6 @@ class Database:
             )
         ''')
         
-        # Таблица админов (СОХРАНЯЕТСЯ НАВСЕГДА!)
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_admins (
                 chat_id INTEGER,
@@ -72,7 +70,6 @@ class Database:
             )
         ''')
         
-        # Таблица нарушителей
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS offenders (
                 chat_id INTEGER,
@@ -89,7 +86,6 @@ class Database:
             )
         ''')
         
-        # Таблица запрещенных слов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS ban_words (
                 chat_id INTEGER,
@@ -99,7 +95,6 @@ class Database:
             )
         ''')
         
-        # Таблица логов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +107,6 @@ class Database:
             )
         ''')
         
-        # Таблица приветствий
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS greetings (
                 chat_id INTEGER PRIMARY KEY,
@@ -146,10 +140,8 @@ class Database:
         return not current
     
     def is_group_admin(self, chat_id, user_id):
-        # Супер-админ всегда админ
         if user_id == SUPER_ADMIN_ID:
             return True
-        # Проверяем в базе данных
         self.cursor.execute('SELECT * FROM group_admins WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
         return self.cursor.fetchone() is not None
     
@@ -159,12 +151,10 @@ class Database:
             VALUES (?, ?, ?, ?, ?)
         ''', (chat_id, user_id, username, added_by, datetime.now()))
         self.conn.commit()
-        print(f"✅ Админ {username} добавлен в группу {chat_id}")
     
     def remove_group_admin(self, chat_id, user_id):
         self.cursor.execute('DELETE FROM group_admins WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
         self.conn.commit()
-        print(f"✅ Админ удален из группы {chat_id}")
     
     def get_group_admins(self, chat_id):
         self.cursor.execute('SELECT * FROM group_admins WHERE chat_id = ?', (chat_id,))
@@ -457,11 +447,11 @@ def start(message):
 /functions - вкл/выкл функции
 /settings - настройки группы
 /logs - логи нарушений
-/stats - статистика чата
 /mute [мин] - замутить (ответом)
 /unmute - размутить (ответом)
 /reset_warns - сбросить варны
 /add_admin - добавить админа
+/admins - список админов
     """
     bot.reply_to(message, text, parse_mode='Markdown')
 
@@ -508,24 +498,26 @@ def settings_command(message):
         settings = db.get_group_settings(chat_id)
         mute_minutes = settings['mute_time'] // 60
         
+        # Проверяем наличие всех ключей
         text = f"""
 ⚙️ **НАСТРОЙКИ ГРУППЫ** ⚙️
 
 📌 **ОСНОВНЫЕ:**
-• Флуд: {settings['max_messages']} за {settings['time_window']} сек
-• Капс: >{settings['caps_limit']}%
-• Эмодзи: >{settings['emoji_limit']}
-• Ссылки: кд {settings['link_kd']} мин
-• Медиа: {settings['media_limit']} за 5 сек
+• Флуд: {settings.get('max_messages', 4)} за {settings.get('time_window', 3)} сек
+• Капс: >{settings.get('caps_limit', 50)}%
+• Эмодзи: >{settings.get('emoji_limit', 5)}
+• Ссылки: кд {settings.get('link_kd', 10)} мин
+• Медиа: {settings.get('media_limit', 3)} за 5 сек
 
 🔨 **НАКАЗАНИЯ:**
-• Лимит варнов: {settings['warn_limit']}
+• Лимит варнов: {settings.get('warn_limit', 5)}
 • Время мута: {mute_minutes} мин
-• Авто-сброс варнов: через {settings['warn_reset_time']} ч
-• Авто-мут: {'✅' if settings['auto_mute'] else '❌'}
+• Авто-сброс варнов: через {settings.get('warn_reset_time', 24)} ч
+• Авто-мут: {'✅' if settings.get('auto_mute', True) else '❌'}
 
 📏 **ДРУГОЕ:**
-• Макс длина: {settings['max_length']} симв.
+• Макс длина: {settings.get('max_length', 1000)} симв.
+• Статус антиспама: {'✅ Вкл' if settings.get('enabled', True) else '❌ Выкл'}
 
 **📝 КОМАНДЫ ДЛЯ ИЗМЕНЕНИЯ:**
 /set_max_msgs [1-20]
@@ -542,7 +534,7 @@ def settings_command(message):
         """
         bot.reply_to(message, text, parse_mode='Markdown')
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+        bot.reply_to(message, f"❌ Ошибка при получении настроек: {e}")
 
 @bot.message_handler(commands=['logs'])
 def show_logs(message):
@@ -564,17 +556,6 @@ def show_logs(message):
         text += f"{emoji} @{log['username']}: {log['reason']}\n   🕒 {log['timestamp'][:19]}\n\n"
     
     bot.reply_to(message, text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['stats'])
-def show_stats(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    if not is_admin(chat_id, user_id):
-        bot.reply_to(message, "❌ Только админы!")
-        return
-    
-    bot.reply_to(message, "📊 Статистика скоро будет...")
 
 @bot.message_handler(commands=['mute'])
 def mute_command(message):
@@ -605,8 +586,8 @@ def mute_command(message):
             bot.delete_message(chat_id, message.reply_to_message.message_id)
         except:
             pass
-    except:
-        bot.reply_to(message, "❌ Используй: /mute [минуты]")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
 
 @bot.message_handler(commands=['unmute'])
 def unmute_command(message):
@@ -757,7 +738,6 @@ def set_greeting(message):
     except:
         bot.reply_to(message, "❌ Использование: /greeting [текст] (используй {user} для имени)")
 
-# Настройки параметров
 @bot.message_handler(commands=['set_max_msgs'])
 def set_max_msgs(message):
     chat_id = message.chat.id
@@ -995,7 +975,16 @@ def handle_message(message):
             bot.send_message(message.chat.id, warning)
         except:
             pass
-
+@bot.message_handler(commands=['fix'])
+def fix_admin(message):
+    """Принудительно сделать админом"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    username = message.from_user.username or "user"
+    
+    # Добавляем в базу принудительно
+    db.add_group_admin(chat_id, user_id, username, 0)
+    bot.reply_to(message, f"✅ Ты принудительно добавлен в админы! Перезапусти бота.")
 # ============================================
 # ЗАПУСК НА RENDER
 # ============================================
