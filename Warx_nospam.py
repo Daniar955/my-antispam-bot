@@ -25,7 +25,7 @@ app = Flask(__name__)
 # НАСТРОЙКИ СИСТЕМЫ ЖАЛОБ
 # ============================================
 REPORT_LIMIT = 3  # Сколько жалоб нужно для авто-мута
-REPORT_MUTE_MINUTES = 10  # На сколько минут мутить
+REPORT_MUTE_MINUTES = 15  # На сколько минут мутить
 reported_messages = defaultdict(set)  # Временное хранилище жалоб
 
 # ============================================
@@ -755,4 +755,484 @@ def mute_command(message):
     chat_id = message.chat.id
     user_id = message.from_user.id
     
-    if not is_admin(chat_id, user_id
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
+        return
+    
+    try:
+        parts = message.text.split()
+        minutes = 1 if len(parts) < 2 else max(1, min(int(parts[1]), 1440))
+        
+        target = message.reply_to_message.from_user
+        target_name = get_username(target)
+        
+        mute_until = db.mute_user(chat_id, target.id, target_name, minutes, 
+                                  f"Ручной мут от @{get_username(message.from_user)}")
+        
+        # Форматируем время окончания мута
+        mute_time_str = mute_until.strftime("%H:%M %d.%m.%Y")
+        
+        bot.reply_to(message, f"🔇 @{target_name} замучен на {minutes} мин!\n⏱️ До: {mute_time_str}")
+        
+        try:
+            bot.delete_message(chat_id, message.reply_to_message.message_id)
+        except:
+            pass
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(commands=['unmute'])
+def unmute_command(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
+        return
+    
+    target = message.reply_to_message.from_user
+    db.unmute_user(chat_id, target.id)
+    bot.reply_to(message, f"✅ @{get_username(target)} размучен!")
+
+@bot.message_handler(commands=['add_admin'])
+def add_admin(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
+        return
+    
+    new_admin = message.reply_to_message.from_user
+    db.add_group_admin(chat_id, new_admin.id, get_username(new_admin), user_id)
+    bot.reply_to(message, f"✅ @{get_username(new_admin)} теперь админ!")
+
+@bot.message_handler(commands=['remove_admin'])
+def remove_admin(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
+        return
+    
+    admin = message.reply_to_message.from_user
+    db.remove_group_admin(chat_id, admin.id)
+    bot.reply_to(message, f"✅ @{get_username(admin)} больше не админ")
+
+@bot.message_handler(commands=['admins'])
+def list_admins(message):
+    chat_id = message.chat.id
+    
+    admins = db.get_group_admins(chat_id)
+    
+    if not admins:
+        bot.reply_to(message, "📝 Админов пока нет")
+        return
+    
+    text = "👑 **АДМИНЫ БОТА:**\n"
+    for admin in admins:
+        text += f"• @{admin['username']}\n"
+    
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['reset_warns'])
+def reset_warns(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
+        return
+    
+    target = message.reply_to_message.from_user
+    db.reset_warns(chat_id, target.id)
+    bot.reply_to(message, f"✅ Предупреждения сброшены для @{get_username(target)}")
+
+@bot.message_handler(commands=['add_banword'])
+def add_banword(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    try:
+        word = message.text.split()[1].lower()
+        db.add_ban_word(chat_id, word, user_id)
+        bot.reply_to(message, f"🚫 Слово '{word}' добавлено в бан-лист!")
+    except:
+        bot.reply_to(message, "❌ Использование: /add_banword слово")
+
+@bot.message_handler(commands=['remove_banword'])
+def remove_banword(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    try:
+        word = message.text.split()[1].lower()
+        db.remove_ban_word(chat_id, word)
+        bot.reply_to(message, f"✅ Слово '{word}' удалено из бан-листа!")
+    except:
+        bot.reply_to(message, "❌ Использование: /remove_banword слово")
+
+@bot.message_handler(commands=['banwords'])
+def banwords(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    words = db.get_ban_words(chat_id)
+    if words:
+        text = "🚫 **БАН-СЛОВА:**\n" + "\n".join([f"• {w}" for w in words])
+    else:
+        text = "📝 Бан-слов пока нет"
+    
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['greeting'])
+def set_greeting(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    try:
+        greeting = message.text.split(maxsplit=1)[1]
+        db.set_greeting(chat_id, greeting)
+        bot.reply_to(message, f"✅ Приветствие установлено:\n{greeting}")
+    except:
+        bot.reply_to(message, "❌ Использование: /greeting [текст] (используй {user} для имени)")
+
+@bot.message_handler(commands=['set_max_msgs'])
+def set_max_msgs(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    try:
+        val = int(message.text.split()[1])
+        if 1 <= val <= 20:
+            db.update_setting(chat_id, 'max_messages', val)
+            bot.reply_to(message, f"✅ Макс сообщений: {val}")
+    except:
+        bot.reply_to(message, "❌ /set_max_msgs [1-20]")
+
+@bot.message_handler(commands=['set_time'])
+def set_time(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    try:
+        val = int(message.text.split()[1])
+        if 1 <= val <= 10:
+            db.update_setting(chat_id, 'time_window', val)
+            bot.reply_to(message, f"✅ Время: {val} сек")
+    except:
+        bot.reply_to(message, "❌ /set_time [1-10]")
+
+@bot.message_handler(commands=['set_caps'])
+def set_caps(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    try:
+        val = int(message.text.split()[1])
+        if 0 <= val <= 100:
+            db.update_setting(chat_id, 'caps_limit', val)
+            bot.reply_to(message, f"✅ Капс: {val}%")
+    except:
+        bot.reply_to(message, "❌ /set_caps [0-100]")
+
+@bot.message_handler(commands=['set_emoji'])
+def set_emoji(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    try:
+        val = int(message.text.split()[1])
+        if 0 <= val <= 20:
+            db.update_setting(chat_id, 'emoji_limit', val)
+            bot.reply_to(message, f"✅ Эмодзи: {val}")
+    except:
+        bot.reply_to(message, "❌ /set_emoji [0-20]")
+
+@bot.message_handler(commands=['set_link_kd'])
+def set_link_kd(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    try:
+        val = int(message.text.split()[1])
+        if 0 <= val <= 60:
+            db.update_setting(chat_id, 'link_kd', val)
+            bot.reply_to(message, f"✅ Кд ссылок: {val} мин")
+    except:
+        bot.reply_to(message, "❌ /set_link_kd [0-60]")
+
+@bot.message_handler(commands=['set_media_limit'])
+def set_media_limit(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    try:
+        val = int(message.text.split()[1])
+        if 1 <= val <= 10:
+            db.update_setting(chat_id, 'media_limit', val)
+            bot.reply_to(message, f"✅ Медиа лимит: {val}")
+    except:
+        bot.reply_to(message, "❌ /set_media_limit [1-10]")
+
+@bot.message_handler(commands=['set_warn_limit'])
+def set_warn_limit(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    try:
+        val = int(message.text.split()[1])
+        if 1 <= val <= 10:
+            db.update_setting(chat_id, 'warn_limit', val)
+            bot.reply_to(message, f"✅ Лимит варнов: {val}")
+    except:
+        bot.reply_to(message, "❌ /set_warn_limit [1-10]")
+
+@bot.message_handler(commands=['set_mute_time'])
+def set_mute_time(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    try:
+        minutes = int(message.text.split()[1])
+        if 1 <= minutes <= 60:
+            seconds = minutes * 60
+            db.update_setting(chat_id, 'mute_time', seconds)
+            bot.reply_to(message, f"✅ Время мута: {minutes} мин")
+    except:
+        bot.reply_to(message, "❌ /set_mute_time [1-60] (МИНУТЫ)")
+
+@bot.message_handler(commands=['set_max_len'])
+def set_max_len(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    try:
+        val = int(message.text.split()[1])
+        if 10 <= val <= 5000:
+            db.update_setting(chat_id, 'max_length', val)
+            bot.reply_to(message, f"✅ Макс длина: {val} симв.")
+    except:
+        bot.reply_to(message, "❌ /set_max_len [10-5000]")
+
+@bot.message_handler(commands=['set_warn_reset'])
+def set_warn_reset(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id): 
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    try:
+        val = int(message.text.split()[1])
+        if 1 <= val <= 168:
+            db.update_setting(chat_id, 'warn_reset_time', val)
+            bot.reply_to(message, f"✅ Авто-сброс варнов: через {val} ч")
+    except:
+        bot.reply_to(message, "❌ /set_warn_reset [1-168] (часов)")
+
+@bot.message_handler(commands=['antispam_on'])
+def antispam_on(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    db.update_setting(chat_id, 'enabled', 1)
+    bot.reply_to(message, "🟢 **АНТИСПАМ ВКЛЮЧЕН!**", parse_mode='Markdown')
+
+@bot.message_handler(commands=['antispam_off'])
+def antispam_off(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    db.update_setting(chat_id, 'enabled', 0)
+    bot.reply_to(message, "🔴 **АНТИСПАМ ВЫКЛЮЧЕН!**", parse_mode='Markdown')
+
+# ============================================
+# АВАРИЙНАЯ КОМАНДА FIX
+# ============================================
+@bot.message_handler(commands=['fix'])
+def fix_admin(message):
+    """Принудительно сделать админом"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    username = get_username(message.from_user)
+    
+    # Добавляем в базу принудительно
+    db.add_group_admin(chat_id, user_id, username, SUPER_ADMIN_ID)
+    bot.reply_to(message, f"✅ @{username} принудительно добавлен в админы! Теперь все команды должны работать.")
+
+# ============================================
+# CALLBACK HANDLERS
+# ============================================
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    chat_id = call.message.chat.id
+    user_id = call.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.answer_callback_query(call.id, "❌ Только админы!")
+        return
+    
+    if call.data.startswith('toggle_'):
+        function = call.data.replace('toggle_', '') + '_enabled'
+        new_state = db.toggle_function(chat_id, function)
+        status = "✅ ВКЛ" if new_state else "❌ ВЫКЛ"
+        bot.answer_callback_query(call.id, f"Функция {status}")
+        functions_menu(call.message)
+    
+    elif call.data == "settings_menu":
+        settings_command(call.message)
+    
+    elif call.data == "logs_menu":
+        show_logs(call.message)
+
+# ============================================
+# ОБРАБОТЧИКИ СООБЩЕНИЙ
+# ============================================
+@bot.message_handler(content_types=['new_chat_members'])
+def welcome_new(message):
+    chat_id = message.chat.id
+    settings = db.get_group_settings(chat_id)
+    
+    for member in message.new_chat_members:
+        if member.id == bot.get_me().id:
+            bot.reply_to(message, 
+                "🤖 **IMBA АНТИСПАМ АКТИВИРОВАН!**\n"
+                "👑 /functions - управление\n"
+                "🔨 /mute - ручной мут\n"
+                "⚙️ /settings - настройки\n"
+                "📢 /report - пожаловаться\n"
+                "🆘 /fix - если не работают команды",
+                parse_mode='Markdown'
+            )
+            creator = message.from_user
+            db.add_group_admin(chat_id, creator.id, get_username(creator), SUPER_ADMIN_ID)
+        
+        elif settings['welcome_enabled']:
+            greeting = db.get_greeting(chat_id).replace('{user}', f"@{get_username(member)}")
+            bot.reply_to(message, greeting, parse_mode='Markdown')
+
+@bot.message_handler(content_types=['text', 'photo', 'video', 'document'])
+def handle_message(message):
+    if message.text and message.text.startswith('/'):
+        return
+    
+    if message.chat.type == 'private':
+        bot.reply_to(message, "🤖 Добавь меня в группу!")
+        return
+    
+    # Очистка старых жалоб (раз в 100 сообщений)
+    if random.randint(1, 100) == 1:
+        current_time = time.time()
+        keys_to_remove = []
+        for (c_id, msg_id), users in reported_messages.items():
+            if c_id == message.chat.id:
+                # Если прошло больше часа, очищаем
+                keys_to_remove.append((c_id, msg_id))
+        for key in keys_to_remove:
+            reported_messages.pop(key, None)
+    
+    is_allowed, warning = spam_filter.check_message(message)
+    
+    if not is_allowed and warning:
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+            bot.send_message(message.chat.id, warning)
+        except:
+            pass
+
+# ============================================
+# ЗАПУСК НА RENDER
+# ============================================
+@app.route('/')
+def home():
+    return "🔥 IMBA ANTISPAM БОТ РАБОТАЕТ! 🔥", 200
+
+@app.route(f'/{TOKEN}', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    return 'Wrong content type', 403
+
+def set_webhook():
+    print("🔄 Настройка вебхука...")
+    RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL')
+    if not RENDER_URL:
+        print("❌ Нет RENDER_EXTERNAL_URL!")
+        return False
+    
+    webhook_url = f"{RENDER_URL}/{TOKEN}"
+    bot.remove_webhook()
+    time.sleep(1)
+    bot.set_webhook(url=webhook_url)
+    
+    me = bot.get_me()
+    print(f"✅ Бот @{me.username} запущен!")
+    return True
+
+if __name__ == '__main__':
+    print("🔥 ЗАПУСК IMBA ANTISPAM БОТА")
+    set_webhook()
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
