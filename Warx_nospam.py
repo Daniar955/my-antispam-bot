@@ -16,13 +16,13 @@ TOKEN = os.environ.get('BOT_TOKEN')
 if not TOKEN:
     raise ValueError("❌ Нет токена! Добавь BOT_TOKEN в переменные окружения!")
 
-SUPER_ADMIN_ID = int(os.environ.get('SUPER_ADMIN_ID', 123456789))
+SUPER_ADMIN_ID = int(os.environ.get('SUPER_ADMIN_ID', 6647021953))
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
 # ============================================
-# ИМБОВАЯ БАЗА ДАННЫХ
+# БАЗА ДАННЫХ (ВСЁ СОХРАНЯЕТСЯ)
 # ============================================
 class Database:
     def __init__(self):
@@ -30,10 +30,10 @@ class Database:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.conn.cursor()
         self.create_tables()
-        print("✅ [IMBA] База данных подключена")
+        print("✅ База данных подключена")
     
     def create_tables(self):
-        # ТАБЛИЦА НАСТРОЕК
+        # Таблица настроек групп
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_settings (
                 chat_id INTEGER PRIMARY KEY,
@@ -60,7 +60,7 @@ class Database:
             )
         ''')
         
-        # ТАБЛИЦА АДМИНОВ
+        # Таблица админов (СОХРАНЯЕТСЯ НАВСЕГДА!)
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_admins (
                 chat_id INTEGER,
@@ -72,7 +72,7 @@ class Database:
             )
         ''')
         
-        # ТАБЛИЦА НАРУШИТЕЛЕЙ
+        # Таблица нарушителей
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS offenders (
                 chat_id INTEGER,
@@ -89,7 +89,7 @@ class Database:
             )
         ''')
         
-        # ТАБЛИЦА БАН-СЛОВ
+        # Таблица запрещенных слов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS ban_words (
                 chat_id INTEGER,
@@ -99,7 +99,7 @@ class Database:
             )
         ''')
         
-        # ТАБЛИЦА ЛОГОВ
+        # Таблица логов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,7 +112,7 @@ class Database:
             )
         ''')
         
-        # ТАБЛИЦА ПРИВЕТСТВИЙ
+        # Таблица приветствий
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS greetings (
                 chat_id INTEGER PRIMARY KEY,
@@ -120,35 +120,18 @@ class Database:
             )
         ''')
         
-        # ТАБЛИЦА СТАТИСТИКИ
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stats (
-                chat_id INTEGER,
-                user_id INTEGER,
-                username TEXT,
-                messages_count INTEGER DEFAULT 0,
-                warns_count INTEGER DEFAULT 0,
-                mutes_count INTEGER DEFAULT 0,
-                last_message TIMESTAMP,
-                PRIMARY KEY (chat_id, user_id)
-            )
-        ''')
-        
         self.conn.commit()
-        print("✅ [IMBA] Все таблицы созданы")
+        print("✅ Все таблицы созданы")
     
     def get_group_settings(self, chat_id):
         self.cursor.execute('SELECT * FROM group_settings WHERE chat_id = ?', (chat_id,))
         result = self.cursor.fetchone()
         
         if not result:
-            self.cursor.execute('''
-                INSERT INTO group_settings (chat_id) VALUES (?)
-            ''', (chat_id,))
+            self.cursor.execute('INSERT INTO group_settings (chat_id) VALUES (?)', (chat_id,))
             self.conn.commit()
             self.cursor.execute('SELECT * FROM group_settings WHERE chat_id = ?', (chat_id,))
             result = self.cursor.fetchone()
-            print(f"✅ [IMBA] Созданы настройки для группы {chat_id}")
         
         columns = [description[0] for description in self.cursor.description]
         return dict(zip(columns, result))
@@ -156,7 +139,6 @@ class Database:
     def update_setting(self, chat_id, setting, value):
         self.cursor.execute(f'UPDATE group_settings SET {setting} = ? WHERE chat_id = ?', (value, chat_id))
         self.conn.commit()
-        print(f"✅ [IMBA] Настройка {setting} = {value} для группы {chat_id}")
     
     def toggle_function(self, chat_id, function_name):
         current = self.get_group_settings(chat_id)[function_name]
@@ -164,8 +146,10 @@ class Database:
         return not current
     
     def is_group_admin(self, chat_id, user_id):
+        # Супер-админ всегда админ
         if user_id == SUPER_ADMIN_ID:
             return True
+        # Проверяем в базе данных
         self.cursor.execute('SELECT * FROM group_admins WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
         return self.cursor.fetchone() is not None
     
@@ -175,12 +159,12 @@ class Database:
             VALUES (?, ?, ?, ?, ?)
         ''', (chat_id, user_id, username, added_by, datetime.now()))
         self.conn.commit()
-        print(f"✅ [IMBA] Админ {username} добавлен")
+        print(f"✅ Админ {username} добавлен в группу {chat_id}")
     
     def remove_group_admin(self, chat_id, user_id):
         self.cursor.execute('DELETE FROM group_admins WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
         self.conn.commit()
-        print(f"✅ [IMBA] Админ удален")
+        print(f"✅ Админ удален из группы {chat_id}")
     
     def get_group_admins(self, chat_id):
         self.cursor.execute('SELECT * FROM group_admins WHERE chat_id = ?', (chat_id,))
@@ -198,26 +182,14 @@ class Database:
             VALUES (?, ?, ?)
         ''', (chat_id, word.lower(), added_by))
         self.conn.commit()
-        print(f"✅ [IMBA] Слово '{word}' добавлено в бан")
     
     def remove_ban_word(self, chat_id, word):
         self.cursor.execute('DELETE FROM ban_words WHERE chat_id = ? AND word = ?', (chat_id, word.lower()))
         self.conn.commit()
-        print(f"✅ [IMBA] Слово '{word}' удалено")
     
     def add_warn(self, chat_id, user_id, username, reason):
         offender = self.get_offender(chat_id, user_id)
         settings = self.get_group_settings(chat_id)
-        
-        if offender and offender['last_warn_reset']:
-            last_reset = datetime.fromisoformat(offender['last_warn_reset'])
-            if datetime.now() - last_reset > timedelta(hours=settings['warn_reset_time']):
-                self.cursor.execute('''
-                    UPDATE offenders SET warns = 0, last_warn_reset = ?
-                    WHERE chat_id = ? AND user_id = ?
-                ''', (datetime.now(), chat_id, user_id))
-                self.conn.commit()
-                offender = self.get_offender(chat_id, user_id)
         
         if offender:
             self.cursor.execute('''
@@ -233,22 +205,19 @@ class Database:
             ''', (chat_id, user_id, username, datetime.now(), datetime.now(), datetime.now(), reason))
             new_warns = 1
         
-        self.update_stats(chat_id, user_id, username, 'warn')
         self.log_action(chat_id, user_id, username, 'WARN', reason)
         self.conn.commit()
         
         if settings['auto_mute'] and new_warns >= settings['warn_limit']:
             mute_until = datetime.now() + timedelta(seconds=settings['mute_time'])
-            self.cursor.execute('''
-                UPDATE offenders SET muted_until = ? WHERE chat_id = ? AND user_id = ?
-            ''', (mute_until, chat_id, user_id))
+            self.cursor.execute('UPDATE offenders SET muted_until = ? WHERE chat_id = ? AND user_id = ?', 
+                              (mute_until, chat_id, user_id))
             self.conn.commit()
             return new_warns, mute_until
         
         return new_warns, None
     
     def mute_user(self, chat_id, user_id, username, minutes, reason="Ручной мут"):
-        """Мут пользователя в МИНУТАХ!"""
         seconds = minutes * 60
         mute_until = datetime.now() + timedelta(seconds=seconds)
         
@@ -264,16 +233,13 @@ class Database:
                 VALUES (?, ?, ?, 0, ?, ?, ?, ?)
             ''', (chat_id, user_id, username, datetime.now(), datetime.now(), mute_until, reason))
         
-        self.update_stats(chat_id, user_id, username, 'mute')
         self.log_action(chat_id, user_id, username, 'MUTE', f"{reason} на {minutes} мин")
         self.conn.commit()
         return mute_until
     
     def unmute_user(self, chat_id, user_id):
-        self.cursor.execute('''
-            UPDATE offenders SET muted_until = NULL 
-            WHERE chat_id = ? AND user_id = ?
-        ''', (chat_id, user_id))
+        self.cursor.execute('UPDATE offenders SET muted_until = NULL WHERE chat_id = ? AND user_id = ?', 
+                          (chat_id, user_id))
         self.log_action(chat_id, user_id, "unknown", 'UNMUTE', "Снятие мута")
         self.conn.commit()
     
@@ -297,63 +263,13 @@ class Database:
         self.unmute_user(chat_id, user_id)
         self.conn.commit()
     
-    def update_stats(self, chat_id, user_id, username, action):
-        self.cursor.execute('SELECT * FROM stats WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
-        stats = self.cursor.fetchone()
-        
-        if stats:
-            if action == 'message':
-                self.cursor.execute('''
-                    UPDATE stats SET messages_count = messages_count + 1, last_message = ?, username = ?
-                    WHERE chat_id = ? AND user_id = ?
-                ''', (datetime.now(), username, chat_id, user_id))
-            elif action == 'warn':
-                self.cursor.execute('''
-                    UPDATE stats SET warns_count = warns_count + 1, username = ?
-                    WHERE chat_id = ? AND user_id = ?
-                ''', (username, chat_id, user_id))
-            elif action == 'mute':
-                self.cursor.execute('''
-                    UPDATE stats SET mutes_count = mutes_count + 1, username = ?
-                    WHERE chat_id = ? AND user_id = ?
-                ''', (username, chat_id, user_id))
-        else:
-            if action == 'message':
-                self.cursor.execute('''
-                    INSERT INTO stats (chat_id, user_id, username, messages_count, last_message)
-                    VALUES (?, ?, ?, 1, ?)
-                ''', (chat_id, user_id, username, datetime.now()))
-            elif action == 'warn':
-                self.cursor.execute('''
-                    INSERT INTO stats (chat_id, user_id, username, warns_count)
-                    VALUES (?, ?, ?, 1)
-                ''', (chat_id, user_id, username))
-        
-        self.conn.commit()
-    
-    def get_stats(self, chat_id, user_id=None):
-        if user_id:
-            self.cursor.execute('SELECT * FROM stats WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
-            result = self.cursor.fetchone()
-            if result:
-                columns = [description[0] for description in self.cursor.description]
-                return dict(zip(columns, result))
-            return None
-        else:
-            self.cursor.execute('''
-                SELECT * FROM stats WHERE chat_id = ? ORDER BY messages_count DESC LIMIT 10
-            ''', (chat_id,))
-            result = self.cursor.fetchall()
-            columns = [description[0] for description in self.cursor.description]
-            return [dict(zip(columns, row)) for row in result]
-    
     def log_action(self, chat_id, user_id, username, action, reason):
         self.cursor.execute('''
             INSERT INTO logs (chat_id, user_id, username, action, reason, timestamp)
             VALUES (?, ?, ?, ?, ?, ?)
         ''', (chat_id, user_id, username, action, reason, datetime.now()))
         self.conn.commit()
-        print(f"📝 [IMBA] Лог: {action} - {username} - {reason}")
+        print(f"📝 Лог: {action} - {username} - {reason}")
     
     def get_logs(self, chat_id, limit=20):
         self.cursor.execute('''
@@ -368,7 +284,6 @@ class Database:
             INSERT OR REPLACE INTO greetings (chat_id, message) VALUES (?, ?)
         ''', (chat_id, message))
         self.conn.commit()
-        print(f"✅ [IMBA] Приветствие для группы {chat_id} установлено")
     
     def get_greeting(self, chat_id):
         self.cursor.execute('SELECT message FROM greetings WHERE chat_id = ?', (chat_id,))
@@ -378,54 +293,11 @@ class Database:
 db = Database()
 
 # ============================================
-# ИМБОВЫЙ КЛАСС АНТИСПАМА
+# КЛАСС АНТИСПАМА
 # ============================================
-class ImbaAntiSpam:
+class AntiSpam:
     def __init__(self):
         self.user_messages = defaultdict(list)
-        self.user_media = defaultdict(list)
-        
-        self.warnings = {
-            'flood': [
-                "⚡ **МЕГА-ФЛУД!** {msgs} за {sec} сек!",
-                "🤬 **ТЫ ЧЕ ТАК ЧАСТО ПИШЕШЬ?**",
-                "🚫 **ФЛУД-ДЕТЕКТОР СРАБОТАЛ!**",
-                "💀 **СПАМ-ФИЛЬТР УНИЧТОЖИЛ СООБЩЕНИЕ!**",
-                "👿 **ФЛУД НЕ ПРОЙДЕТ!**"
-            ],
-            'caps': [
-                "🔇 **ХВАТИТ ОРАТЬ КАПСОМ!**",
-                "👂 **УШИ ЗАВЯЛИ!**",
-                "📢 **СДЕЛАЙ ПОТИШЕ!**",
-                "🗣️ **КРИКИ ЗАПРЕЩЕНЫ!**"
-            ],
-            'emoji': [
-                "🎭 **ХВАТИТ СПАМИТЬ ЭМОДЗИ!**",
-                "🎪 **ЦИРК УЕХАЛ ВМЕСТЕ СО СМАЙЛИКАМИ!**",
-                "🎨 **УБЕРИ ЭМОДЗИ!**",
-                "😊 **ЭМОДЗИ-ЛИМИТ ПРЕВЫШЕН!**"
-            ],
-            'repeat': [
-                "🔄 **ХВАТИТ ПОВТОРЯТЬСЯ!**",
-                "🔁 **ПОВТОР СООБЩЕНИЯ ОБНАРУЖЕН!**",
-                "♻️ **ЭХО-КАМЕРА ОТКЛЮЧЕНА!**"
-            ],
-            'link': [
-                "🔗 **НОВИЧКАМ НЕЛЬЗЯ ССЫЛКИ!**",
-                "🚫 **ССЫЛКИ ЗАПРЕЩЕНЫ НА {kd} МИН!**",
-                "🔒 **РЕЖИМ АНТИ-ССЫЛОК АКТИВИРОВАН!**"
-            ],
-            'swear': [
-                "🤬 **НЕ МАТЕРЬСЯ!**",
-                "🚫 **ПЛОХИЕ СЛОВА ПОД ЗАПРЕТОМ!**",
-                "🔴 **ОБНАРУЖЕНО ЗАПРЕЩЕННОЕ СЛОВО!**"
-            ],
-            'media': [
-                "📸 **ХВАТИТ СПАМИТЬ МЕДИА!**",
-                "🎥 **МЕДИА-ФЛУД КОНТРОЛЬ!**",
-                "🖼️ **НЕ ТАК МНОГО ФОТО!**"
-            ]
-        }
     
     def has_link(self, text):
         link_pattern = re.compile(r'(https?://|www\.)[^\s]+')
@@ -455,8 +327,6 @@ class ImbaAntiSpam:
         
         settings = db.get_group_settings(chat_id)
         
-        db.update_stats(chat_id, user_id, username, 'message')
-        
         if not settings['enabled']:
             return True, None
         
@@ -476,113 +346,83 @@ class ImbaAntiSpam:
         offender = db.get_offender(chat_id, user_id)
         join_time = datetime.fromisoformat(offender['join_time']) if offender else datetime.now()
         
-        self.user_messages[key] = [
-            msg for msg in self.user_messages[key] 
-            if current_time - msg['time'] < 60
-        ]
+        self.user_messages[key] = [msg for msg in self.user_messages[key] if current_time - msg['time'] < 60]
         
         if len(text) > settings['max_length']:
-            return False, f"⚠️ **СЛИШКОМ ДЛИННО!**\nМаксимум: {settings['max_length']} симв.\nУ тебя: {len(text)} симв."
+            return False, f"⚠️ Слишком длинно! Макс: {settings['max_length']} симв."
         
         if settings['flood_enabled']:
-            recent_messages = [
-                msg for msg in self.user_messages[key] 
-                if current_time - msg['time'] < settings['time_window']
-            ]
-            
-            if len(recent_messages) >= settings['max_messages']:
-                warns, mute_until = db.add_warn(chat_id, user_id, username, f"Флуд ({len(recent_messages)} за {settings['time_window']}с)")
-                warning = random.choice(self.warnings['flood']).format(msgs=settings['max_messages'], sec=settings['time_window'])
-                
-                if mute_until:
-                    minutes = settings['mute_time'] // 60
-                    warning += f"\n🔇 **АВТО-МУТ на {minutes} мин!**"
+            recent = [msg for msg in self.user_messages[key] if current_time - msg['time'] < settings['time_window']]
+            if len(recent) >= settings['max_messages']:
+                warns, mute = db.add_warn(chat_id, user_id, username, f"Флуд")
+                warning = f"⚡ ФЛУД! {settings['max_messages']} за {settings['time_window']} сек"
+                if mute:
+                    warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
-                    warning += f"\n⚠️ **ПРЕДУПРЕЖДЕНИЕ:** {warns}/{settings['warn_limit']}"
-                
+                    warning += f"\n⚠️ Предупреждение: {warns}/{settings['warn_limit']}"
                 return False, warning
         
         if settings['caps_enabled'] and len(text) > 5:
-            upper_count = sum(1 for c in text if c.isupper())
-            upper_percent = (upper_count / len(text)) * 100
-            
-            if upper_percent > settings['caps_limit']:
-                warns, mute_until = db.add_warn(chat_id, user_id, username, f"Капс ({upper_percent:.0f}%)")
-                warning = random.choice(self.warnings['caps'])
-                
-                if mute_until:
-                    minutes = settings['mute_time'] // 60
-                    warning += f"\n🔇 **АВТО-МУТ на {minutes} мин!**"
+            upper = sum(1 for c in text if c.isupper()) / len(text) * 100
+            if upper > settings['caps_limit']:
+                warns, mute = db.add_warn(chat_id, user_id, username, f"Капс")
+                warning = "🔇 ХВАТИТ ОРАТЬ!"
+                if mute:
+                    warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
-                    warning += f"\n⚠️ **ПРЕДУПРЕЖДЕНИЕ:** {warns}/{settings['warn_limit']}"
-                
+                    warning += f"\n⚠️ Предупреждение: {warns}/{settings['warn_limit']}"
                 return False, warning
         
         if settings['emoji_enabled']:
-            emoji_count = self.count_emojis(text)
-            if emoji_count > settings['emoji_limit']:
-                warns, mute_until = db.add_warn(chat_id, user_id, username, f"Эмодзи ({emoji_count})")
-                warning = random.choice(self.warnings['emoji']) + f"\n😊 Эмодзи: {emoji_count}"
-                
-                if mute_until:
-                    minutes = settings['mute_time'] // 60
-                    warning += f"\n🔇 **АВТО-МУТ на {minutes} мин!**"
+            emoji = self.count_emojis(text)
+            if emoji > settings['emoji_limit']:
+                warns, mute = db.add_warn(chat_id, user_id, username, f"Эмодзи")
+                warning = f"🎭 ХВАТИТ СПАМИТЬ ЭМОДЗИ! ({emoji})"
+                if mute:
+                    warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
-                    warning += f"\n⚠️ **ПРЕДУПРЕЖДЕНИЕ:** {warns}/{settings['warn_limit']}"
-                
+                    warning += f"\n⚠️ Предупреждение: {warns}/{settings['warn_limit']}"
                 return False, warning
         
         if settings['repeat_enabled'] and len(self.user_messages[key]) >= 3:
-            last_texts = [msg['text'] for msg in self.user_messages[key][-3:]]
-            if all(t == text for t in last_texts):
-                warns, mute_until = db.add_warn(chat_id, user_id, username, "Повтор сообщения")
-                warning = random.choice(self.warnings['repeat'])
-                
-                if mute_until:
-                    minutes = settings['mute_time'] // 60
-                    warning += f"\n🔇 **АВТО-МУТ на {minutes} мин!**"
+            last = [msg['text'] for msg in self.user_messages[key][-3:]]
+            if all(t == text for t in last):
+                warns, mute = db.add_warn(chat_id, user_id, username, "Повтор")
+                warning = "🔄 ХВАТИТ ПОВТОРЯТЬСЯ!"
+                if mute:
+                    warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
-                    warning += f"\n⚠️ **ПРЕДУПРЕЖДЕНИЕ:** {warns}/{settings['warn_limit']}"
-                
+                    warning += f"\n⚠️ Предупреждение: {warns}/{settings['warn_limit']}"
                 return False, warning
         
         if settings['links_enabled'] and self.has_link(text):
             if offender and (datetime.now() - join_time).total_seconds() < settings['link_kd'] * 60:
-                warns, mute_until = db.add_warn(chat_id, user_id, username, "Ссылка (новичок)")
-                warning = random.choice(self.warnings['link']).format(kd=settings['link_kd'])
-                
-                if mute_until:
-                    minutes = settings['mute_time'] // 60
-                    warning += f"\n🔇 **АВТО-МУТ на {minutes} мин!**"
+                warns, mute = db.add_warn(chat_id, user_id, username, "Ссылка")
+                warning = f"🔗 НОВИЧКАМ НЕЛЬЗЯ ССЫЛКИ! ЖДИ {settings['link_kd']} МИН"
+                if mute:
+                    warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
-                    warning += f"\n⚠️ **ПРЕДУПРЕЖДЕНИЕ:** {warns}/{settings['warn_limit']}"
-                
+                    warning += f"\n⚠️ Предупреждение: {warns}/{settings['warn_limit']}"
                 return False, warning
         
         if settings['swear_enabled']:
             ban_words = db.get_ban_words(chat_id)
-            has_swear, found_word = self.has_swear(text, ban_words)
+            has_swear, word = self.has_swear(text, ban_words)
             if has_swear:
-                warns, mute_until = db.add_warn(chat_id, user_id, username, f"Мат: {found_word}")
-                warning = random.choice(self.warnings['swear']) + f"\n🔴 Слово: {found_word}"
-                
-                if mute_until:
-                    minutes = settings['mute_time'] // 60
-                    warning += f"\n🔇 **АВТО-МУТ на {minutes} мин!**"
+                warns, mute = db.add_warn(chat_id, user_id, username, f"Мат")
+                warning = f"🤬 НЕ МАТЕРЬСЯ! Слово: {word}"
+                if mute:
+                    warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
-                    warning += f"\n⚠️ **ПРЕДУПРЕЖДЕНИЕ:** {warns}/{settings['warn_limit']}"
-                
+                    warning += f"\n⚠️ Предупреждение: {warns}/{settings['warn_limit']}"
                 return False, warning
         
         if text:
-            self.user_messages[key].append({
-                'text': text,
-                'time': current_time
-            })
+            self.user_messages[key].append({'text': text, 'time': current_time})
         
         return True, None
 
-spam_filter = ImbaAntiSpam()
+spam_filter = AntiSpam()
 
 # ============================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -594,24 +434,24 @@ def get_username(user):
     return user.username or user.first_name or f"user_{user.id}"
 
 # ============================================
-# ИМБОВЫЕ КОМАНДЫ
+# КОМАНДЫ БОТА
 # ============================================
 @bot.message_handler(commands=['start'])
 def start(message):
     text = """
-🔥 **IMBA ANTISPAM БОТ** 🔥
+🔥 **IMBA ANTISPAM BOT** 🔥
 
 **🤖 МЕГА-ФУНКЦИИ:**
-• 🚫 Анти-флуд (4 за 3 сек)
-• 🔇 Анти-капс (>50%)
-• 😊 Анти-эмодзи (>5)
-• 🔁 Анти-повторы
-• 🔗 Анти-ссылки для новичков
-• 🤬 Анти-мат (свой список)
-• 📸 Анти-медиа флуд
-• 👋 Приветствие новичков
-• 🔨 Авто-мут после N варнов
-• 👑 Ручной мут (/mute)
+• Анти-флуд (4 за 3 сек)
+• Анти-капс (>50%)
+• Анти-эмодзи (>5)
+• Анти-повторы
+• Анти-ссылки для новичков
+• Анти-мат (свой список)
+• Анти-медиа флуд
+• Приветствие новичков
+• Авто-мут после N варнов
+• Ручной мут (/mute)
 
 **👑 АДМИН КОМАНДЫ:**
 /functions - вкл/выкл функции
@@ -648,15 +488,15 @@ def functions_menu(message):
         types.InlineKeyboardButton(f"{'✅' if settings['welcome_enabled'] else '❌'} Приветствие", callback_data="toggle_welcome"),
         types.InlineKeyboardButton(f"{'✅' if settings['auto_mute'] else '❌'} Авто-мут", callback_data="toggle_mute"),
         types.InlineKeyboardButton("⚙️ Настройки", callback_data="settings_menu"),
-        types.InlineKeyboardButton("📋 Логи", callback_data="logs_menu"),
-        types.InlineKeyboardButton("📊 Статистика", callback_data="stats_menu")
+        types.InlineKeyboardButton("📋 Логи", callback_data="logs_menu")
     ]
     markup.add(*buttons)
     
     bot.reply_to(message, "🔧 **УПРАВЛЕНИЕ ФУНКЦИЯМИ**\nНажми чтобы вкл/выкл:", reply_markup=markup, parse_mode='Markdown')
 
 @bot.message_handler(commands=['settings'])
-def settings_menu(message):
+def settings_command(message):
+    """Показать настройки группы"""
     chat_id = message.chat.id
     user_id = message.from_user.id
     
@@ -664,20 +504,19 @@ def settings_menu(message):
         bot.reply_to(message, "❌ Только админы!")
         return
     
-    settings = db.get_group_settings(chat_id)
-    
-    # Конвертируем секунды в минуты для отображения
-    mute_minutes = settings['mute_time'] // 60
-    
-    text = f"""
+    try:
+        settings = db.get_group_settings(chat_id)
+        mute_minutes = settings['mute_time'] // 60
+        
+        text = f"""
 ⚙️ **НАСТРОЙКИ ГРУППЫ** ⚙️
 
 📌 **ОСНОВНЫЕ:**
-• Флуд: {settings['max_messages']} за {settings['time_window']}с
+• Флуд: {settings['max_messages']} за {settings['time_window']} сек
 • Капс: >{settings['caps_limit']}%
 • Эмодзи: >{settings['emoji_limit']}
 • Ссылки: кд {settings['link_kd']} мин
-• Медиа: {settings['media_limit']} за 5с
+• Медиа: {settings['media_limit']} за 5 сек
 
 🔨 **НАКАЗАНИЯ:**
 • Лимит варнов: {settings['warn_limit']}
@@ -700,7 +539,30 @@ def settings_menu(message):
 /set_max_len [10-5000]
 /set_warn_reset [1-168] (часов)
 /greeting [текст]
-    """
+        """
+        bot.reply_to(message, text, parse_mode='Markdown')
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.message_handler(commands=['logs'])
+def show_logs(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    logs = db.get_logs(chat_id, 10)
+    if not logs:
+        bot.reply_to(message, "📝 Логов пока нет")
+        return
+    
+    text = "📋 **ПОСЛЕДНИЕ ДЕЙСТВИЯ:**\n\n"
+    for log in logs:
+        emoji = "⚠️" if log['action'] == 'WARN' else "🔇" if log['action'] == 'MUTE' else "✅"
+        text += f"{emoji} @{log['username']}: {log['reason']}\n   🕒 {log['timestamp'][:19]}\n\n"
+    
     bot.reply_to(message, text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['stats'])
@@ -712,56 +574,10 @@ def show_stats(message):
         bot.reply_to(message, "❌ Только админы!")
         return
     
-    stats = db.get_stats(chat_id)
-    
-    if not stats:
-        bot.reply_to(message, "📊 **Статистика пока пуста**")
-        return
-    
-    text = "📊 **ТОП АКТИВНЫХ УЧАСТНИКОВ:**\n\n"
-    for i, stat in enumerate(stats[:10], 1):
-        text += f"{i}. @{stat['username']}\n"
-        text += f"   💬 Сообщений: {stat['messages_count']}\n"
-        text += f"   ⚠️ Варнов: {stat['warns_count']}\n"
-        text += f"   🔇 Мутов: {stat['mutes_count']}\n\n"
-    
-    bot.reply_to(message, text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['logs'])
-def show_logs(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    if not is_admin(chat_id, user_id):
-        bot.reply_to(message, "❌ Только админы!")
-        return
-    
-    try:
-        logs = db.get_logs(chat_id, 20)
-        
-        if not logs:
-            bot.reply_to(message, "📝 **Логов пока нет**")
-            return
-        
-        text = "📋 **ПОСЛЕДНИЕ ДЕЙСТВИЯ:**\n\n"
-        for log in logs:
-            username = log.get('username', 'Unknown')
-            reason = log.get('reason', 'Нет причины')
-            timestamp = log.get('timestamp', '')
-            action = log.get('action', '')
-            
-            emoji = "⚠️" if action == 'WARN' else "🔇" if action == 'MUTE' else "✅" if action == 'UNMUTE' else "📌"
-            time_str = timestamp[:19] if timestamp else "неизвестно"
-            
-            text += f"{emoji} **@{username}**\n   └ {reason}\n   └ 🕒 {time_str}\n\n"
-        
-        bot.reply_to(message, text, parse_mode='Markdown')
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+    bot.reply_to(message, "📊 Статистика скоро будет...")
 
 @bot.message_handler(commands=['mute'])
 def mute_command(message):
-    """Ручной мут пользователя В МИНУТАХ!"""
     chat_id = message.chat.id
     user_id = message.from_user.id
     
@@ -770,47 +586,30 @@ def mute_command(message):
         return
     
     if not message.reply_to_message:
-        bot.reply_to(message, "❌ Ответь на сообщение пользователя, которого хочешь замутить!")
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
         return
     
     try:
-        # Парсим время в минутах
         parts = message.text.split()
-        if len(parts) < 2:
-            minutes = 1  # По умолчанию 1 минута
-        else:
-            minutes = int(parts[1])
-            if minutes < 1:
-                minutes = 1
-            if minutes > 1440:  # Не больше 24 часов (1440 минут)
-                minutes = 1440
+        minutes = 1 if len(parts) < 2 else max(1, min(int(parts[1]), 1440))
         
         target = message.reply_to_message.from_user
         target_name = get_username(target)
-        admin_name = get_username(message.from_user)
         
-        # Мутим в минутах
-        mute_until = db.mute_user(chat_id, target.id, target_name, minutes, f"Ручной мут от @{admin_name}")
+        mute_until = db.mute_user(chat_id, target.id, target_name, minutes, 
+                                  f"Ручной мут от @{get_username(message.from_user)}")
         
-        # Рассчитываем время окончания
-        mute_time_str = mute_until.strftime("%H:%M %d.%m.%Y")
+        bot.reply_to(message, f"🔇 @{target_name} замучен на {minutes} мин!")
         
-        bot.reply_to(message, f"🔇 **Пользователь @{target_name} замучен на {minutes} мин!**\n⏱️ До: {mute_time_str}")
-        
-        # Удаляем сообщение нарушителя
         try:
             bot.delete_message(chat_id, message.reply_to_message.message_id)
         except:
             pass
-            
-    except ValueError:
-        bot.reply_to(message, "❌ Используй: /mute [количество минут]\nПример: /mute 5 - замутить на 5 минут")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+    except:
+        bot.reply_to(message, "❌ Используй: /mute [минуты]")
 
 @bot.message_handler(commands=['unmute'])
 def unmute_command(message):
-    """Снять мут"""
     chat_id = message.chat.id
     user_id = message.from_user.id
     
@@ -824,8 +623,7 @@ def unmute_command(message):
     
     target = message.reply_to_message.from_user
     db.unmute_user(chat_id, target.id)
-    
-    bot.reply_to(message, f"✅ **@{get_username(target)} размучен!**")
+    bot.reply_to(message, f"✅ @{get_username(target)} размучен!")
 
 @bot.message_handler(commands=['add_admin'])
 def add_admin(message):
@@ -892,7 +690,6 @@ def reset_warns(message):
     
     target = message.reply_to_message.from_user
     db.reset_warns(chat_id, target.id)
-    
     bot.reply_to(message, f"✅ Предупреждения сброшены для @{get_username(target)}")
 
 @bot.message_handler(commands=['add_banword'])
@@ -937,7 +734,6 @@ def banwords(message):
         return
     
     words = db.get_ban_words(chat_id)
-    
     if words:
         text = "🚫 **БАН-СЛОВА:**\n" + "\n".join([f"• {w}" for w in words])
     else:
@@ -959,11 +755,9 @@ def set_greeting(message):
         db.set_greeting(chat_id, greeting)
         bot.reply_to(message, f"✅ Приветствие установлено:\n{greeting}")
     except:
-        bot.reply_to(message, "❌ Использование: /greeting [текст]\nИспользуй {user} для имени")
+        bot.reply_to(message, "❌ Использование: /greeting [текст] (используй {user} для имени)")
 
-# ============================================
-# НАСТРОЙКИ ПАРАМЕТРОВ
-# ============================================
+# Настройки параметров
 @bot.message_handler(commands=['set_max_msgs'])
 def set_max_msgs(message):
     chat_id = message.chat.id
@@ -1071,7 +865,6 @@ def set_warn_limit(message):
 
 @bot.message_handler(commands=['set_mute_time'])
 def set_mute_time(message):
-    """Настройка времени мута В МИНУТАХ!"""
     chat_id = message.chat.id
     user_id = message.from_user.id
     if not is_admin(chat_id, user_id): 
@@ -1079,7 +872,7 @@ def set_mute_time(message):
         return
     try:
         minutes = int(message.text.split()[1])
-        if 1 <= minutes <= 60:  # от 1 до 60 минут
+        if 1 <= minutes <= 60:
             seconds = minutes * 60
             db.update_setting(chat_id, 'mute_time', seconds)
             bot.reply_to(message, f"✅ Время мута: {minutes} мин")
@@ -1156,13 +949,10 @@ def handle_callback(call):
         functions_menu(call.message)
     
     elif call.data == "settings_menu":
-        settings_menu(call.message)
+        settings_command(call.message)
     
     elif call.data == "logs_menu":
         show_logs(call.message)
-    
-    elif call.data == "stats_menu":
-        show_stats(call.message)
 
 # ============================================
 # ОБРАБОТЧИКИ СООБЩЕНИЙ
@@ -1177,16 +967,15 @@ def welcome_new(message):
             bot.reply_to(message, 
                 "🤖 **IMBA АНТИСПАМ АКТИВИРОВАН!**\n"
                 "👑 /functions - управление\n"
-                "🔨 /mute - ручной мут (в минутах)\n"
-                "📊 /stats - статистика",
+                "🔨 /mute - ручной мут\n"
+                "⚙️ /settings - настройки",
                 parse_mode='Markdown'
             )
             creator = message.from_user
             db.add_group_admin(chat_id, creator.id, get_username(creator), SUPER_ADMIN_ID)
         
         elif settings['welcome_enabled']:
-            greeting = db.get_greeting(chat_id)
-            greeting = greeting.replace('{user}', f"@{get_username(member)}")
+            greeting = db.get_greeting(chat_id).replace('{user}', f"@{get_username(member)}")
             bot.reply_to(message, greeting, parse_mode='Markdown')
 
 @bot.message_handler(content_types=['text', 'photo', 'video', 'document'])
@@ -1242,6 +1031,5 @@ def set_webhook():
 if __name__ == '__main__':
     print("🔥 ЗАПУСК IMBA ANTISPAM БОТА")
     set_webhook()
-    
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
