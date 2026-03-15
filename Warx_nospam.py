@@ -1,13 +1,16 @@
 import telebot
 from telebot import types
 import time
-from collections import defaultdict
+from collections import defaultdict, Counter
 import re
 import random
 import sqlite3
 import os
 from datetime import datetime, timedelta
 from flask import Flask, request
+import json
+import hashlib
+import urllib.parse
 
 # ============================================
 # НАСТРОЙКИ
@@ -22,14 +25,40 @@ bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
 # ============================================
-# НАСТРОЙКИ СИСТЕМЫ ЖАЛОБ
+# НАСТРОЙКИ СИСТЕМ
 # ============================================
-REPORT_LIMIT = 3  # Сколько жалоб нужно для авто-мута
-REPORT_MUTE_MINUTES = 15  # На сколько минут мутить
-reported_messages = defaultdict(set)  # Временное хранилище жалоб
+REPORT_LIMIT = 3
+REPORT_MUTE_MINUTES = 10
+reported_messages = defaultdict(set)
+
+# Система уровней
+LEVELS = {
+    1: 0,
+    2: 100,
+    3: 300,
+    4: 600,
+    5: 1000,
+    6: 1500,
+    7: 2100,
+    8: 2800,
+    9: 3600,
+    10: 4500
+}
+
+# Достижения
+ACHIEVEMENTS = {
+    'first_message': {'name': 'Первые шаги', 'desc': 'Отправить первое сообщение', 'emoji': '👶'},
+    '100_messages': {'name': 'Болтун', 'desc': 'Отправить 100 сообщений', 'emoji': '🗣️'},
+    '1000_messages': {'name': 'Легенда чата', 'desc': 'Отправить 1000 сообщений', 'emoji': '👑'},
+    'helper': {'name': 'Помощник', 'desc': 'Помочь другому участнику', 'emoji': '🦸'},
+    'reporter': {'name': 'Борец со спамом', 'desc': 'Пожаловаться на спам 10 раз', 'emoji': '🛡️'},
+    'old_timer': {'name': 'Старожил', 'desc': 'Быть в чате больше года', 'emoji': '⏳'},
+    'game_master': {'name': 'Игрок', 'desc': 'Сыграть в 10 игр', 'emoji': '🎮'},
+    'night_owl': {'name': 'Ночная сова', 'desc': 'Писать после полуночи', 'emoji': '🦉'},
+}
 
 # ============================================
-# БАЗА ДАННЫХ
+# РАСШИРЕННАЯ БАЗА ДАННЫХ
 # ============================================
 class Database:
     def __init__(self):
@@ -63,7 +92,10 @@ class Database:
                 auto_mute BOOLEAN DEFAULT 1,
                 mute_time INTEGER DEFAULT 60,
                 max_length INTEGER DEFAULT 1000,
-                warn_reset_time INTEGER DEFAULT 24
+                warn_reset_time INTEGER DEFAULT 24,
+                games_enabled BOOLEAN DEFAULT 1,
+                stats_enabled BOOLEAN DEFAULT 1,
+                leveling_enabled BOOLEAN DEFAULT 1
             )
         ''')
         
@@ -75,6 +107,28 @@ class Database:
                 username TEXT,
                 added_by INTEGER,
                 date_added TIMESTAMP,
+                PRIMARY KEY (chat_id, user_id)
+            )
+        ''')
+        
+        # Таблица пользователей (для системы уровней)
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                chat_id INTEGER,
+                user_id INTEGER,
+                username TEXT,
+                first_name TEXT,
+                messages INTEGER DEFAULT 0,
+                exp INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1,
+                games_played INTEGER DEFAULT 0,
+                games_won INTEGER DEFAULT 0,
+                reports_sent INTEGER DEFAULT 0,
+                helped_count INTEGER DEFAULT 0,
+                join_date TIMESTAMP,
+                last_active TIMESTAMP,
+                achievements TEXT DEFAULT '[]',
+                reputation INTEGER DEFAULT 0,
                 PRIMARY KEY (chat_id, user_id)
             )
         ''')
@@ -143,9 +197,281 @@ class Database:
             )
         ''')
         
+        # Таблица для событий
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                title TEXT,
+                description TEXT,
+                event_date TIMESTAMP,
+                created_by INTEGER,
+                created_at TIMESTAMP,
+                participants TEXT DEFAULT '[]'
+            )
+        ''')
+        
+        # Таблица для напоминаний
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                user_id INTEGER,
+                username TEXT,
+                reminder_text TEXT,
+                reminder_time TIMESTAMP,
+                created_at TIMESTAMP,
+                is_done BOOLEAN DEFAULT 0
+            )
+        ''')
+        
+        # Таблица для игровой статистики
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS game_stats (
+                chat_id INTEGER,
+                user_id INTEGER,
+                username TEXT,
+                game_type TEXT,
+                games_played INTEGER DEFAULT 0,
+                games_won INTEGER DEFAULT 0,
+                total_score INTEGER DEFAULT 0,
+                PRIMARY KEY (chat_id, user_id, game_type)
+            )
+        ''')
+        
+        # Таблица для викторин
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS quiz_questions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER,
+                question TEXT,
+                answer TEXT,
+                options TEXT,
+                added_by INTEGER,
+                category TEXT DEFAULT 'general'
+            )
+        ''')
+        
         self.conn.commit()
         print("✅ Все таблицы созданы")
     
+    # ========== МЕТОДЫ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ==========
+    def get_user(self, chat_id, user_id):
+        self.cursor.execute('SELECT * FROM users WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
+        result = self.cursor.fetchone()
+        
+        if not result:
+            self.cursor.execute('''
+                INSERT INTO users (chat_id, user_id, username, first_name, join_date, last_active)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (chat_id, user_id, '', '', datetime.now(), datetime.now()))
+            self.conn.commit()
+            self.cursor.execute('SELECT * FROM users WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
+            result = self.cursor.fetchone()
+        
+        columns = [description[0] for description in self.cursor.description]
+        return dict(zip(columns, result))
+    
+    def update_user_activity(self, chat_id, user_id, username, first_name):
+        user = self.get_user(chat_id, user_id)
+        
+        self.cursor.execute('''
+            UPDATE users 
+            SET messages = messages + 1, 
+                exp = exp + 1,
+                last_active = ?,
+                username = ?,
+                first_name = ?
+            WHERE chat_id = ? AND user_id = ?
+        ''', (datetime.now(), username, first_name, chat_id, user_id))
+        self.conn.commit()
+        
+        # Проверка на повышение уровня
+        user = self.get_user(chat_id, user_id)
+        new_level = user['level']
+        
+        for level, exp_needed in LEVELS.items():
+            if user['exp'] >= exp_needed and level > new_level:
+                new_level = level
+        
+        if new_level > user['level']:
+            self.cursor.execute('''
+                UPDATE users SET level = ? WHERE chat_id = ? AND user_id = ?
+            ''', (new_level, chat_id, user_id))
+            self.conn.commit()
+            return new_level
+        return None
+    
+    def add_achievement(self, chat_id, user_id, achievement_key):
+        user = self.get_user(chat_id, user_id)
+        achievements = json.loads(user['achievements']) if user['achievements'] else []
+        
+        if achievement_key not in achievements:
+            achievements.append(achievement_key)
+            self.cursor.execute('''
+                UPDATE users SET achievements = ? WHERE chat_id = ? AND user_id = ?
+            ''', (json.dumps(achievements), chat_id, user_id))
+            self.conn.commit()
+            return True
+        return False
+    
+    def get_top_users(self, chat_id, limit=10):
+        self.cursor.execute('''
+            SELECT username, messages, exp, level FROM users 
+            WHERE chat_id = ? 
+            ORDER BY exp DESC LIMIT ?
+        ''', (chat_id, limit))
+        result = self.cursor.fetchall()
+        return [{'username': r[0], 'messages': r[1], 'exp': r[2], 'level': r[3]} for r in result]
+    
+    # ========== МЕТОДЫ ДЛЯ СОБЫТИЙ ==========
+    def add_event(self, chat_id, title, description, event_date, created_by):
+        self.cursor.execute('''
+            INSERT INTO events (chat_id, title, description, event_date, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (chat_id, title, description, event_date, created_by, datetime.now()))
+        self.conn.commit()
+        return self.cursor.lastrowid
+    
+    def get_events(self, chat_id, upcoming=True):
+        now = datetime.now()
+        if upcoming:
+            self.cursor.execute('''
+                SELECT * FROM events 
+                WHERE chat_id = ? AND event_date > ? 
+                ORDER BY event_date ASC
+            ''', (chat_id, now))
+        else:
+            self.cursor.execute('''
+                SELECT * FROM events 
+                WHERE chat_id = ? 
+                ORDER BY event_date DESC LIMIT 10
+            ''', (chat_id,))
+        
+        result = self.cursor.fetchall()
+        columns = [description[0] for description in self.cursor.description]
+        return [dict(zip(columns, row)) for row in result]
+    
+    def add_participant(self, event_id, user_id, username):
+        self.cursor.execute('SELECT participants FROM events WHERE id = ?', (event_id,))
+        result = self.cursor.fetchone()
+        if result:
+            participants = json.loads(result[0]) if result[0] else []
+            if user_id not in [p['user_id'] for p in participants]:
+                participants.append({'user_id': user_id, 'username': username, 'joined_at': str(datetime.now())})
+                self.cursor.execute('UPDATE events SET participants = ? WHERE id = ?', 
+                                  (json.dumps(participants), event_id))
+                self.conn.commit()
+                return True
+        return False
+    
+    # ========== МЕТОДЫ ДЛЯ НАПОМИНАНИЙ ==========
+    def add_reminder(self, chat_id, user_id, username, text, reminder_time):
+        self.cursor.execute('''
+            INSERT INTO reminders (chat_id, user_id, username, reminder_text, reminder_time, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (chat_id, user_id, username, text, reminder_time, datetime.now()))
+        self.conn.commit()
+        return self.cursor.lastrowid
+    
+    def get_due_reminders(self):
+        now = datetime.now()
+        self.cursor.execute('''
+            SELECT * FROM reminders 
+            WHERE reminder_time <= ? AND is_done = 0
+        ''', (now,))
+        result = self.cursor.fetchall()
+        columns = [description[0] for description in self.cursor.description]
+        return [dict(zip(columns, row)) for row in result]
+    
+    def mark_reminder_done(self, reminder_id):
+        self.cursor.execute('UPDATE reminders SET is_done = 1 WHERE id = ?', (reminder_id,))
+        self.conn.commit()
+    
+    # ========== МЕТОДЫ ДЛЯ ИГР ==========
+    def update_game_stats(self, chat_id, user_id, username, game_type, won=False, score=0):
+        self.cursor.execute('''
+            SELECT * FROM game_stats WHERE chat_id = ? AND user_id = ? AND game_type = ?
+        ''', (chat_id, user_id, game_type))
+        result = self.cursor.fetchone()
+        
+        if result:
+            if won:
+                self.cursor.execute('''
+                    UPDATE game_stats 
+                    SET games_played = games_played + 1, 
+                        games_won = games_won + 1,
+                        total_score = total_score + ?,
+                        username = ?
+                    WHERE chat_id = ? AND user_id = ? AND game_type = ?
+                ''', (score, username, chat_id, user_id, game_type))
+            else:
+                self.cursor.execute('''
+                    UPDATE game_stats 
+                    SET games_played = games_played + 1,
+                        total_score = total_score + ?,
+                        username = ?
+                    WHERE chat_id = ? AND user_id = ? AND game_type = ?
+                ''', (score, username, chat_id, user_id, game_type))
+        else:
+            self.cursor.execute('''
+                INSERT INTO game_stats (chat_id, user_id, username, game_type, games_played, games_won, total_score)
+                VALUES (?, ?, ?, ?, 1, ?, ?)
+            ''', (chat_id, user_id, username, game_type, 1 if won else 0, score))
+        
+        self.conn.commit()
+    
+    def get_game_leaderboard(self, chat_id, game_type=None, limit=10):
+        if game_type:
+            self.cursor.execute('''
+                SELECT username, games_played, games_won, total_score FROM game_stats 
+                WHERE chat_id = ? AND game_type = ?
+                ORDER BY games_won DESC, total_score DESC LIMIT ?
+            ''', (chat_id, game_type, limit))
+        else:
+            self.cursor.execute('''
+                SELECT username, SUM(games_played) as total_played, 
+                       SUM(games_won) as total_won, SUM(total_score) as total_score 
+                FROM game_stats 
+                WHERE chat_id = ? 
+                GROUP BY user_id 
+                ORDER BY total_won DESC, total_score DESC LIMIT ?
+            ''', (chat_id, limit))
+        
+        result = self.cursor.fetchall()
+        return result
+    
+    # ========== МЕТОДЫ ДЛЯ ВИКТОРИН ==========
+    def add_quiz_question(self, chat_id, question, answer, options, added_by, category='general'):
+        self.cursor.execute('''
+            INSERT INTO quiz_questions (chat_id, question, answer, options, added_by, category)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (chat_id, question, answer, json.dumps(options), added_by, category))
+        self.conn.commit()
+    
+    def get_random_question(self, chat_id, category=None):
+        if category:
+            self.cursor.execute('''
+                SELECT * FROM quiz_questions 
+                WHERE chat_id = ? AND category = ?
+                ORDER BY RANDOM() LIMIT 1
+            ''', (chat_id, category))
+        else:
+            self.cursor.execute('''
+                SELECT * FROM quiz_questions 
+                WHERE chat_id = ?
+                ORDER BY RANDOM() LIMIT 1
+            ''', (chat_id,))
+        
+        result = self.cursor.fetchone()
+        if result:
+            columns = [description[0] for description in self.cursor.description]
+            question = dict(zip(columns, result))
+            question['options'] = json.loads(question['options'])
+            return question
+        return None
+    
+    # ========== СУЩЕСТВУЮЩИЕ МЕТОДЫ ==========
     def get_group_settings(self, chat_id):
         self.cursor.execute('SELECT * FROM group_settings WHERE chat_id = ?', (chat_id,))
         result = self.cursor.fetchone()
@@ -180,12 +506,11 @@ class Database:
             VALUES (?, ?, ?, ?, ?)
         ''', (chat_id, user_id, username, added_by, datetime.now()))
         self.conn.commit()
-        print(f"✅ Админ {username} добавлен в группу {chat_id}")
+        print(f"✅ Админ {username} добавлен")
     
     def remove_group_admin(self, chat_id, user_id):
         self.cursor.execute('DELETE FROM group_admins WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
         self.conn.commit()
-        print(f"✅ Админ удален из группы {chat_id}")
     
     def get_group_admins(self, chat_id):
         self.cursor.execute('SELECT * FROM group_admins WHERE chat_id = ?', (chat_id,))
@@ -203,12 +528,10 @@ class Database:
             VALUES (?, ?, ?)
         ''', (chat_id, word.lower(), added_by))
         self.conn.commit()
-        print(f"✅ Слово '{word}' добавлено в бан-лист")
     
     def remove_ban_word(self, chat_id, word):
         self.cursor.execute('DELETE FROM ban_words WHERE chat_id = ? AND word = ?', (chat_id, word.lower()))
         self.conn.commit()
-        print(f"✅ Слово '{word}' удалено из бан-листа")
     
     def add_warn(self, chat_id, user_id, username, reason):
         offender = self.get_offender(chat_id, user_id)
@@ -285,7 +608,6 @@ class Database:
                           (datetime.now(), chat_id, user_id))
         self.unmute_user(chat_id, user_id)
         self.conn.commit()
-        print(f"✅ Предупреждения сброшены для пользователя {user_id} в группе {chat_id}")
     
     def log_action(self, chat_id, user_id, username, action, reason):
         self.cursor.execute('''
@@ -308,7 +630,6 @@ class Database:
             INSERT OR REPLACE INTO greetings (chat_id, message) VALUES (?, ?)
         ''', (chat_id, message))
         self.conn.commit()
-        print(f"✅ Приветствие для группы {chat_id} установлено")
     
     def get_greeting(self, chat_id):
         self.cursor.execute('SELECT message FROM greetings WHERE chat_id = ?', (chat_id,))
@@ -323,6 +644,39 @@ db = Database()
 class AntiSpam:
     def __init__(self):
         self.user_messages = defaultdict(list)
+        
+        self.warnings = {
+            'flood': [
+                "⚡ ФЛУД! {msgs} за {sec} сек",
+                "🤬 ХВАТИТ СПАМИТЬ!",
+                "🚫 ФЛУД-КОНТРОЛЬ!"
+            ],
+            'caps': [
+                "🔇 ХВАТИТ ОРАТЬ!",
+                "👂 УШИ ЗАВЯЛИ!",
+                "📢 СДЕЛАЙ ТИШЕ!"
+            ],
+            'emoji': [
+                "🎭 ХВАТИТ СПАМИТЬ ЭМОДЗИ!",
+                "🎪 ЦИРК УЕХАЛ!"
+            ],
+            'repeat': [
+                "🔄 ХВАТИТ ПОВТОРЯТЬСЯ!",
+                "🔁 ПОВТОР СООБЩЕНИЯ!"
+            ],
+            'link': [
+                "🔗 НОВИЧКАМ НЕЛЬЗЯ ССЫЛКИ!",
+                "🚫 ССЫЛКИ ЗАПРЕЩЕНЫ!"
+            ],
+            'swear': [
+                "🤬 НЕ МАТЕРЬСЯ!",
+                "🚫 ПЛОХИЕ СЛОВА ЗАПРЕЩЕНЫ!"
+            ],
+            'media': [
+                "📸 ХВАТИТ СПАМИТЬ МЕДИА!",
+                "🎥 НЕ ТАК МНОГО ФОТО!"
+            ]
+        }
     
     def has_link(self, text):
         link_pattern = re.compile(r'(https?://|www\.)[^\s]+')
@@ -380,7 +734,7 @@ class AntiSpam:
             recent = [msg for msg in self.user_messages[key] if current_time - msg['time'] < settings['time_window']]
             if len(recent) >= settings['max_messages']:
                 warns, mute = db.add_warn(chat_id, user_id, username, f"Флуд")
-                warning = f"⚡ ФЛУД! {settings['max_messages']} за {settings['time_window']} сек"
+                warning = random.choice(self.warnings['flood']).format(msgs=settings['max_messages'], sec=settings['time_window'])
                 if mute:
                     warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
@@ -391,7 +745,7 @@ class AntiSpam:
             upper = sum(1 for c in text if c.isupper()) / len(text) * 100
             if upper > settings['caps_limit']:
                 warns, mute = db.add_warn(chat_id, user_id, username, f"Капс")
-                warning = "🔇 ХВАТИТ ОРАТЬ!"
+                warning = random.choice(self.warnings['caps'])
                 if mute:
                     warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
@@ -402,7 +756,7 @@ class AntiSpam:
             emoji = self.count_emojis(text)
             if emoji > settings['emoji_limit']:
                 warns, mute = db.add_warn(chat_id, user_id, username, f"Эмодзи")
-                warning = f"🎭 ХВАТИТ СПАМИТЬ ЭМОДЗИ! ({emoji})"
+                warning = random.choice(self.warnings['emoji']) + f"\n😊 Эмодзи: {emoji}"
                 if mute:
                     warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
@@ -413,7 +767,7 @@ class AntiSpam:
             last = [msg['text'] for msg in self.user_messages[key][-3:]]
             if all(t == text for t in last):
                 warns, mute = db.add_warn(chat_id, user_id, username, "Повтор")
-                warning = "🔄 ХВАТИТ ПОВТОРЯТЬСЯ!"
+                warning = random.choice(self.warnings['repeat'])
                 if mute:
                     warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
@@ -423,7 +777,7 @@ class AntiSpam:
         if settings['links_enabled'] and self.has_link(text):
             if offender and (datetime.now() - join_time).total_seconds() < settings['link_kd'] * 60:
                 warns, mute = db.add_warn(chat_id, user_id, username, "Ссылка")
-                warning = f"🔗 НОВИЧКАМ НЕЛЬЗЯ ССЫЛКИ! ЖДИ {settings['link_kd']} МИН"
+                warning = random.choice(self.warnings['link']) + f"\n⏱️ ЖДИ {settings['link_kd']} МИН"
                 if mute:
                     warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
@@ -435,7 +789,7 @@ class AntiSpam:
             has_swear, word = self.has_swear(text, ban_words)
             if has_swear:
                 warns, mute = db.add_warn(chat_id, user_id, username, f"Мат")
-                warning = f"🤬 НЕ МАТЕРЬСЯ! Слово: {word}"
+                warning = random.choice(self.warnings['swear']) + f"\n🔴 Слово: {word}"
                 if mute:
                     warning += f"\n🔇 АВТО-МУТ на {settings['mute_time']//60} мин"
                 else:
@@ -468,7 +822,6 @@ def report_message(message):
     user_id = message.from_user.id
     username = get_username(message.from_user)
     
-    # Проверяем, что это ответ на сообщение
     if not message.reply_to_message:
         bot.reply_to(message, "❌ Ответь на сообщение, на которое хочешь пожаловаться!")
         return
@@ -476,37 +829,35 @@ def report_message(message):
     reported_msg = message.reply_to_message
     reported_user = reported_msg.from_user
     
-    # Нельзя жаловаться на админов
     if db.is_group_admin(chat_id, reported_user.id):
         bot.reply_to(message, "👑 На админов жаловаться нельзя!")
         return
     
-    # Нельзя жаловаться на самого себя
     if reported_user.id == user_id:
         bot.reply_to(message, "🤔 На себя жаловаться? Серьезно?")
         return
     
     message_key = (chat_id, reported_msg.message_id)
     
-    # Проверяем, не жаловался ли уже этот пользователь
     if user_id in reported_messages[message_key]:
         bot.reply_to(message, "⚠️ Ты уже жаловался на это сообщение!")
         return
     
-    # Добавляем жалобу во временное хранилище
     reported_messages[message_key].add(user_id)
     report_count = len(reported_messages[message_key])
     
-    # Отправляем подтверждение
     bot.reply_to(message, f"✅ Жалоба отправлена! ({report_count}/{REPORT_LIMIT})")
     
-    # Логируем жалобу
     db.log_action(chat_id, user_id, username, 'REPORT', 
                   f"Пожаловался на @{get_username(reported_user)}")
     
-    # Проверяем, достигнут ли лимит
+    # Обновляем статистику пользователя
+    user = db.get_user(chat_id, user_id)
+    if user['reports_sent'] + 1 >= 10:
+        if db.add_achievement(chat_id, user_id, 'reporter'):
+            bot.send_message(chat_id, f"🏆 @{username} получил достижение: {ACHIEVEMENTS['reporter']['emoji']} {ACHIEVEMENTS['reporter']['name']}!")
+    
     if report_count >= REPORT_LIMIT:
-        # Мутим нарушителя
         mute_until = db.mute_user(
             chat_id, 
             reported_user.id, 
@@ -515,7 +866,6 @@ def report_message(message):
             f"Авто-мут по жалобам ({REPORT_LIMIT} чел.)"
         )
         
-        # Уведомляем чат
         mute_time_str = mute_until.strftime("%H:%M")
         bot.send_message(
             chat_id,
@@ -524,10 +874,8 @@ def report_message(message):
             f"⏱️ До: {mute_time_str}"
         )
         
-        # Очищаем жалобы на это сообщение
         reported_messages.pop(message_key, None)
         
-        # Удаляем сообщение-нарушитель
         try:
             bot.delete_message(chat_id, reported_msg.message_id)
         except:
@@ -535,7 +883,6 @@ def report_message(message):
 
 @bot.message_handler(commands=['reports_clear'])
 def clear_reports(message):
-    """Очистить все жалобы в чате (только для админов)"""
     chat_id = message.chat.id
     user_id = message.from_user.id
     
@@ -543,16 +890,358 @@ def clear_reports(message):
         bot.reply_to(message, "❌ Только админы!")
         return
     
-    # Очищаем все жалобы в этом чате
-    keys_to_remove = []
-    for key in reported_messages:
-        if key[0] == chat_id:
-            keys_to_remove.append(key)
-    
+    keys_to_remove = [key for key in reported_messages if key[0] == chat_id]
     for key in keys_to_remove:
         reported_messages.pop(key, None)
     
     bot.reply_to(message, "✅ Все жалобы в чате очищены!")
+
+# ============================================
+# СИСТЕМА УРОВНЕЙ И СТАТИСТИКИ
+# ============================================
+@bot.message_handler(commands=['profile'])
+def show_profile(message):
+    """Показать профиль пользователя"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    username = get_username(message.from_user)
+    
+    user = db.get_user(chat_id, user_id)
+    achievements = json.loads(user['achievements']) if user['achievements'] else []
+    
+    next_level_exp = LEVELS.get(user['level'] + 1, LEVELS[user['level']] * 2)
+    exp_needed = next_level_exp - user['exp']
+    
+    text = f"""
+👤 **ПРОФИЛЬ @{username}**
+
+📊 **УРОВЕНЬ:** {user['level']}
+✨ **ОПЫТ:** {user['exp']} / {next_level_exp}
+📈 **ДО СЛЕДУЮЩЕГО УРОВНЯ:** {exp_needed} опыта
+
+📝 **СТАТИСТИКА:**
+• Сообщений: {user['messages']}
+• Игр сыграно: {user['games_played']}
+• Побед в играх: {user['games_won']}
+• Жалоб отправлено: {user['reports_sent']}
+• Репутация: {user['reputation']}
+
+🏆 **ДОСТИЖЕНИЯ ({len(achievements)}/{len(ACHIEVEMENTS)}):**
+"""
+    
+    if achievements:
+        for ach in achievements:
+            if ach in ACHIEVEMENTS:
+                text += f"\n{ACHIEVEMENTS[ach]['emoji']} {ACHIEVEMENTS[ach]['name']} — {ACHIEVEMENTS[ach]['desc']}"
+    else:
+        text += "\nПока нет достижений. Будь активнее!"
+    
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['top'])
+def show_top(message):
+    """Показать топ пользователей"""
+    chat_id = message.chat.id
+    
+    top_users = db.get_top_users(chat_id, 10)
+    
+    if not top_users:
+        bot.reply_to(message, "📊 Статистика пока пуста")
+        return
+    
+    text = "🏆 **ТОП-10 ПОЛЬЗОВАТЕЛЕЙ**\n\n"
+    for i, user in enumerate(top_users, 1):
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "🔹"
+        text += f"{medal} {i}. @{user['username']}\n"
+        text += f"   Уровень {user['level']} | Опыт: {user['exp']} | Сообщений: {user['messages']}\n"
+    
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['stats'])
+def show_stats(message):
+    """Показать статистику чата"""
+    chat_id = message.chat.id
+    
+    # Получаем общую статистику
+    db.cursor.execute('SELECT COUNT(*) FROM users WHERE chat_id = ?', (chat_id,))
+    total_users = db.cursor.fetchone()[0]
+    
+    db.cursor.execute('SELECT SUM(messages) FROM users WHERE chat_id = ?', (chat_id,))
+    total_messages = db.cursor.fetchone()[0] or 0
+    
+    db.cursor.execute('SELECT AVG(messages) FROM users WHERE chat_id = ?', (chat_id,))
+    avg_messages = int(db.cursor.fetchone()[0] or 0)
+    
+    db.cursor.execute('SELECT COUNT(*) FROM offenders WHERE chat_id = ?', (chat_id,))
+    total_offenders = db.cursor.fetchone()[0]
+    
+    db.cursor.execute('SELECT COUNT(*) FROM logs WHERE chat_id = ? AND action = "WARN"', (chat_id,))
+    total_warns = db.cursor.fetchone()[0]
+    
+    text = f"""
+📊 **СТАТИСТИКА ЧАТА**
+
+👥 **УЧАСТНИКИ:**
+• Всего в базе: {total_users}
+• Активных сегодня: ?
+
+💬 **СООБЩЕНИЯ:**
+• Всего: {total_messages}
+• В среднем на пользователя: {avg_messages}
+
+⚠️ **НАРУШЕНИЯ:**
+• Нарушителей: {total_offenders}
+• Всего предупреждений: {total_warns}
+
+🎮 **ИГРЫ:**
+• Сыграно игр: ?
+• Побед: ?
+
+🏆 **ТОП-3 АКТИВНЫХ:"""
+    
+    top_users = db.get_top_users(chat_id, 3)
+    for i, user in enumerate(top_users, 1):
+        text += f"\n{i}. @{user['username']} — {user['messages']} сообщ."
+    
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+# ============================================
+# СИСТЕМА СОБЫТИЙ И НАПОМИНАНИЙ
+# ============================================
+@bot.message_handler(commands=['event'])
+def event_command(message):
+    """Создание и управление событиями"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы могут создавать события!")
+        return
+    
+    parts = message.text.split(maxsplit=3)
+    if len(parts) < 4:
+        bot.reply_to(message, "❌ Использование: /event создать | Название | ДД.ММ ЧЧ:ММ | Описание")
+        return
+    
+    action = parts[1].lower()
+    if action == "создать":
+        try:
+            title = parts[2]
+            date_str = parts[3].split('|')[0].strip()
+            description = parts[3].split('|')[1].strip() if '|' in parts[3] else ""
+            
+            event_date = datetime.strptime(date_str, "%d.%m %H:%M")
+            event_date = event_date.replace(year=datetime.now().year)
+            
+            event_id = db.add_event(chat_id, title, description, event_date, user_id)
+            bot.reply_to(message, f"✅ Событие создано!\nID: {event_id}\nНазвание: {title}\n📅 {event_date.strftime('%d.%m.%Y %H:%M')}")
+        except Exception as e:
+            bot.reply_to(message, f"❌ Ошибка: {e}")
+    
+    elif action == "список":
+        events = db.get_events(chat_id)
+        if not events:
+            bot.reply_to(message, "📅 Нет предстоящих событий")
+            return
+        
+        text = "📅 **ПРЕДСТОЯЩИЕ СОБЫТИЯ:**\n\n"
+        for event in events:
+            participants = json.loads(event['participants']) if event['participants'] else []
+            text += f"🔹 **{event['title']}**\n"
+            text += f"   ID: {event['id']} | 📅 {datetime.fromisoformat(event['event_date']).strftime('%d.%m %H:%M')}\n"
+            text += f"   👥 Участников: {len(participants)}\n"
+            if event['description']:
+                text += f"   📝 {event['description']}\n"
+            text += "\n"
+        
+        bot.reply_to(message, text, parse_mode='Markdown')
+    
+    elif action == "идти":
+        try:
+            event_id = int(parts[2])
+            username = get_username(message.from_user)
+            if db.add_participant(event_id, user_id, username):
+                bot.reply_to(message, f"✅ Ты записан на событие!")
+            else:
+                bot.reply_to(message, "⚠️ Ты уже записан или событие не найдено")
+        except:
+            bot.reply_to(message, "❌ Использование: /event идти [ID]")
+
+@bot.message_handler(commands=['remind'])
+def remind_command(message):
+    """Создание напоминания"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    username = get_username(message.from_user)
+    
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        bot.reply_to(message, "❌ Использование: /remind завтра 15:00 Купить молоко")
+        return
+    
+    time_str = parts[1]
+    text = parts[2]
+    
+    try:
+        # Простой парсинг времени
+        if time_str.lower() == "завтра":
+            reminder_time = datetime.now() + timedelta(days=1)
+            reminder_time = reminder_time.replace(hour=12, minute=0, second=0, microsecond=0)
+        elif ":" in time_str:
+            # Сегодня в указанное время
+            hour, minute = map(int, time_str.split(':'))
+            reminder_time = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if reminder_time < datetime.now():
+                reminder_time += timedelta(days=1)
+        else:
+            # Через N минут/часов
+            if 'ч' in time_str:
+                hours = int(time_str.replace('ч', ''))
+                reminder_time = datetime.now() + timedelta(hours=hours)
+            elif 'м' in time_str:
+                minutes = int(time_str.replace('м', ''))
+                reminder_time = datetime.now() + timedelta(minutes=minutes)
+            else:
+                bot.reply_to(message, "❌ Не понимаю формат времени. Используй: завтра, ЧЧ:ММ, Xч, Xм")
+                return
+        
+        reminder_id = db.add_reminder(chat_id, user_id, username, text, reminder_time)
+        bot.reply_to(message, f"✅ Напоминание создано!\nID: {reminder_id}\n⏰ {reminder_time.strftime('%d.%m %H:%M')}\n📝 {text}")
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка: {e}")
+
+# ============================================
+# ИГРЫ И РАЗВЛЕЧЕНИЯ
+# ============================================
+@bot.message_handler(commands=['game'])
+def game_menu(message):
+    """Меню игр"""
+    text = """
+🎮 **ИГРЫ В ЧАТЕ**
+
+Доступные игры:
+/game dice [ставка] — бросить кубик
+/game coin [ставка] — орёл/решка
+/game guess — угадай число (1-100)
+/quiz — викторина с вопросами
+/wordchain — игра в цепочку слов
+/leaderboard — таблица лидеров
+    """
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['quiz'])
+def quiz_command(message):
+    """Викторина"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    question = db.get_random_question(chat_id)
+    if not question:
+        bot.reply_to(message, "❌ Вопросов пока нет. Добавьте через /quiz_add")
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    buttons = []
+    for i, option in enumerate(question['options']):
+        callback_data = f"quiz_{question['id']}_{i}"
+        buttons.append(types.InlineKeyboardButton(option, callback_data=callback_data))
+    markup.add(*buttons)
+    
+    bot.send_message(
+        chat_id,
+        f"❓ **{question['question']}**\n\nВыбери правильный ответ:",
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['quiz_add'])
+def quiz_add_command(message):
+    """Добавить вопрос в викторину (только для админов)"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы могут добавлять вопросы!")
+        return
+    
+    parts = message.text.split('|')
+    if len(parts) < 3:
+        bot.reply_to(message, "❌ Использование: /quiz_add Вопрос | Правильный ответ | Вариант1 | Вариант2 | ...")
+        return
+    
+    question = parts[0].replace('/quiz_add', '').strip()
+    answer = parts[1].strip()
+    options = [opt.strip() for opt in parts[2:]]
+    
+    if answer not in options:
+        options.append(answer)
+        random.shuffle(options)
+    
+    db.add_quiz_question(chat_id, question, answer, options, user_id)
+    bot.reply_to(message, "✅ Вопрос добавлен в викторину!")
+
+@bot.message_handler(commands=['leaderboard'])
+def leaderboard_command(message):
+    """Таблица лидеров в играх"""
+    chat_id = message.chat.id
+    
+    leaders = db.get_game_leaderboard(chat_id)
+    
+    if not leaders:
+        bot.reply_to(message, "📊 Статистика игр пока пуста")
+        return
+    
+    text = "🎮 **ТАБЛИЦА ЛИДЕРОВ В ИГРАХ**\n\n"
+    for i, (username, played, won, score) in enumerate(leaders[:10], 1):
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "🔹"
+        win_rate = (won / played * 100) if played > 0 else 0
+        text += f"{medal} {i}. @{username}\n"
+        text += f"   Игр: {played} | Побед: {won} ({win_rate:.1f}%) | Очков: {score}\n"
+    
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+# ============================================
+# ПОЛЕЗНЫЕ УТИЛИТЫ
+# ============================================
+@bot.message_handler(commands=['weather'])
+def weather_command(message):
+    """Погода (демо-версия)"""
+    city = message.text.replace('/weather', '').strip()
+    if not city:
+        bot.reply_to(message, "❌ Укажи город: /weather Москва")
+        return
+    
+    # Здесь должна быть интеграция с API погоды
+    bot.reply_to(message, f"🌤️ Погода в {city}:\nТемпература: +18°C\nВлажность: 65%\nВетер: 3 м/с")
+
+@bot.message_handler(commands=['currency'])
+def currency_command(message):
+    """Курсы валют (демо-версия)"""
+    text = """
+💰 **КУРСЫ ВАЛЮТ**
+
+USD: 450 ₸
+EUR: 490 ₸
+RUB: 5.2 ₸
+CNY: 62 ₸
+    """
+    bot.reply_to(message, text, parse_mode='Markdown')
+
+@bot.message_handler(commands=['calc'])
+def calc_command(message):
+    """Калькулятор"""
+    expr = message.text.replace('/calc', '').strip()
+    if not expr:
+        bot.reply_to(message, "❌ Пример: /calc 2+2*2")
+        return
+    
+    try:
+        # Безопасное вычисление
+        result = eval(expr, {"__builtins__": {}})
+        bot.reply_to(message, f"📱 {expr} = {result}")
+    except:
+        bot.reply_to(message, "❌ Ошибка в выражении")
 
 # ============================================
 # КОМАНДЫ БОТА
@@ -560,35 +1249,41 @@ def clear_reports(message):
 @bot.message_handler(commands=['start'])
 def start(message):
     text = """
-🔥 **IMBA ANTISPAM BOT** 🔥
+🔥 **MEGA ULTRA IMBA BOT** 🔥
 
-**🤖 МЕГА-ФУНКЦИИ:**
-• Анти-флуд (4 за 3 сек)
-• Анти-капс (>50%)
-• Анти-эмодзи (>5)
-• Анти-повторы
-• Анти-ссылки для новичков
-• Анти-мат (свой список)
-• Анти-медиа флуд
-• Приветствие новичков
+**🤖 ВОЗМОЖНОСТИ:**
+
+🛡️ **АНТИСПАМ:**
+• Флуд, капс, эмодзи, повторы, ссылки, мат
 • Авто-мут после N варнов
 • Ручной мут (/mute)
-• **СИСТЕМА ЖАЛОБ (/report)**
+• Система жалоб (/report)
 
-**👑 АДМИН КОМАНДЫ:**
-/functions - вкл/выкл функции
-/settings - настройки группы
+📊 **СТАТИСТИКА:**
+/profile — твой профиль и достижения
+/top — топ пользователей
+/stats — статистика чата
+
+🎮 **ИГРЫ:**
+/game — меню игр
+/quiz — викторина
+/leaderboard — таблица лидеров
+
+📅 **ПЛАНИРОВЩИК:**
+/event — создать событие
+/remind — напоминание
+
+🛠️ **УТИЛИТЫ:**
+/weather [город] — погода
+/currency — курсы валют
+/calc [выражение] — калькулятор
+
+👑 **АДМИН КОМАНДЫ:**
+/functions - управление функциями
+/settings - настройки
 /logs - логи нарушений
-/mute [мин] - замутить (ответом)
-/unmute - размутить (ответом)
-/reset_warns - сбросить варны
 /add_admin - добавить админа
-/admins - список админов
-/reports_clear - очистить жалобы
-/fix - принудительно стать админом
-
-**👤 ОБЫЧНЫЕ КОМАНДЫ:**
-/report - пожаловаться на сообщение (ответом)
+/quiz_add - добавить вопрос
     """
     bot.reply_to(message, text, parse_mode='Markdown')
 
@@ -614,6 +1309,9 @@ def functions_menu(message):
         types.InlineKeyboardButton(f"{'✅' if settings['media_enabled'] else '❌'} Медиа", callback_data="toggle_media"),
         types.InlineKeyboardButton(f"{'✅' if settings['welcome_enabled'] else '❌'} Приветствие", callback_data="toggle_welcome"),
         types.InlineKeyboardButton(f"{'✅' if settings['auto_mute'] else '❌'} Авто-мут", callback_data="toggle_mute"),
+        types.InlineKeyboardButton(f"{'✅' if settings['games_enabled'] else '❌'} Игры", callback_data="toggle_games"),
+        types.InlineKeyboardButton(f"{'✅' if settings['stats_enabled'] else '❌'} Статистика", callback_data="toggle_stats"),
+        types.InlineKeyboardButton(f"{'✅' if settings['leveling_enabled'] else '❌'} Уровни", callback_data="toggle_leveling"),
         types.InlineKeyboardButton("⚙️ Настройки", callback_data="settings_menu"),
         types.InlineKeyboardButton("📋 Логи", callback_data="logs_menu")
     ]
@@ -621,9 +1319,6 @@ def functions_menu(message):
     
     bot.reply_to(message, "🔧 **УПРАВЛЕНИЕ ФУНКЦИЯМИ**\nНажми чтобы вкл/выкл:", reply_markup=markup, parse_mode='Markdown')
 
-# ============================================
-# КОМАНДА SETTINGS
-# ============================================
 @bot.message_handler(commands=['settings'])
 def settings_command(message):
     """Показать настройки группы"""
@@ -638,7 +1333,6 @@ def settings_command(message):
         settings = db.get_group_settings(chat_id)
         mute_minutes = settings['mute_time'] // 60
         
-        # Функция экранирования спецсимволов Markdown
         def escape_md(text):
             return str(text).replace('_', '\\_').replace('*', '\\*').replace('`', '\\`')
         
@@ -658,76 +1352,22 @@ def settings_command(message):
 • Авто-сброс варнов: через {escape_md(settings.get('warn_reset_time', 24))} ч
 • Авто-мут: {'✅' if settings.get('auto_mute', True) else '❌'}
 
+🎮 **ИГРЫ И РАЗВЛЕЧЕНИЯ:**
+• Игры: {'✅' if settings.get('games_enabled', True) else '❌'}
+• Статистика: {'✅' if settings.get('stats_enabled', True) else '❌'}
+• Система уровней: {'✅' if settings.get('leveling_enabled', True) else '❌'}
+
 📏 **ДРУГОЕ:**
 • Макс длина: {escape_md(settings.get('max_length', 1000))} симв.
 • Статус антиспама: {'✅ Вкл' if settings.get('enabled', True) else '❌ Выкл'}
 
 📝 **СИСТЕМА ЖАЛОБ:**
-• Лимит жалоб для мута: {REPORT_LIMIT}
-• Время мута по жалобам: {REPORT_MUTE_MINUTES} мин
-• Команда: /report (ответом на сообщение)
-
-**📝 КОМАНДЫ ДЛЯ ИЗМЕНЕНИЯ:**
-/set_max_msgs [1-20]
-/set_time [1-10]
-/set_caps [0-100]
-/set_emoji [0-20]
-/set_link_kd [0-60]
-/set_media_limit [1-10]
-/set_warn_limit [1-10]
-/set_mute_time [1-60] (МИНУТЫ)
-/set_max_len [10-5000]
-/set_warn_reset [1-168] (часов)
-/greeting [текст]
+• Лимит жалоб: {REPORT_LIMIT}
+• Время мута: {REPORT_MUTE_MINUTES} мин
         """
         bot.reply_to(message, text, parse_mode='Markdown')
     except Exception as e:
-        # Запасной вариант без Markdown
-        try:
-            settings = db.get_group_settings(chat_id)
-            mute_minutes = settings['mute_time'] // 60
-            
-            text = f"""
-⚙️ НАСТРОЙКИ ГРУППЫ ⚙️
-
-📌 ОСНОВНЫЕ:
-• Флуд: {settings.get('max_messages', 4)} за {settings.get('time_window', 3)} сек
-• Капс: >{settings.get('caps_limit', 50)}%
-• Эмодзи: >{settings.get('emoji_limit', 5)}
-• Ссылки: кд {settings.get('link_kd', 10)} мин
-• Медиа: {settings.get('media_limit', 3)} за 5 сек
-
-🔨 НАКАЗАНИЯ:
-• Лимит варнов: {settings.get('warn_limit', 5)}
-• Время мута: {mute_minutes} мин
-• Авто-сброс варнов: через {settings.get('warn_reset_time', 24)} ч
-• Авто-мут: {'✅ Вкл' if settings.get('auto_mute', True) else '❌ Выкл'}
-
-📏 ДРУГОЕ:
-• Макс длина: {settings.get('max_length', 1000)} симв.
-• Статус антиспама: {'✅ Вкл' if settings.get('enabled', True) else '❌ Выкл'}
-
-📝 СИСТЕМА ЖАЛОБ:
-• Лимит жалоб для мута: {REPORT_LIMIT}
-• Время мута по жалобам: {REPORT_MUTE_MINUTES} мин
-• Команда: /report (ответом на сообщение)
-
-📝 КОМАНДЫ ДЛЯ ИЗМЕНЕНИЯ:
-/set_max_msgs [1-20]
-/set_time [1-10]
-/set_caps [0-100]
-/set_emoji [0-20]
-/set_link_kd [0-60]
-/set_media_limit [1-10]
-/set_warn_limit [1-10]
-/set_mute_time [1-60] (МИНУТЫ)
-/set_max_len [10-5000]
-/set_warn_reset [1-168] (часов)
-/greeting [текст]
-            """
-            bot.reply_to(message, text, parse_mode=None)
-        except Exception as e2:
-            bot.reply_to(message, f"❌ Ошибка при получении настроек: {e2}")
+        bot.reply_to(message, f"❌ Ошибка: {e}")
 
 @bot.message_handler(commands=['logs'])
 def show_logs(message):
@@ -738,7 +1378,7 @@ def show_logs(message):
         bot.reply_to(message, "❌ Только админы!")
         return
     
-    logs = db.get_logs(chat_id, 10)
+    logs = db.get_logs(chat_id, 15)
     if not logs:
         bot.reply_to(message, "📝 Логов пока нет")
         return
@@ -773,9 +1413,7 @@ def mute_command(message):
         mute_until = db.mute_user(chat_id, target.id, target_name, minutes, 
                                   f"Ручной мут от @{get_username(message.from_user)}")
         
-        # Форматируем время окончания мута
         mute_time_str = mute_until.strftime("%H:%M %d.%m.%Y")
-        
         bot.reply_to(message, f"🔇 @{target_name} замучен на {minutes} мин!\n⏱️ До: {mute_time_str}")
         
         try:
@@ -1105,9 +1743,6 @@ def antispam_off(message):
     db.update_setting(chat_id, 'enabled', 0)
     bot.reply_to(message, "🔴 **АНТИСПАМ ВЫКЛЮЧЕН!**", parse_mode='Markdown')
 
-# ============================================
-# АВАРИЙНАЯ КОМАНДА FIX
-# ============================================
 @bot.message_handler(commands=['fix'])
 def fix_admin(message):
     """Принудительно сделать админом"""
@@ -1115,9 +1750,8 @@ def fix_admin(message):
     user_id = message.from_user.id
     username = get_username(message.from_user)
     
-    # Добавляем в базу принудительно
     db.add_group_admin(chat_id, user_id, username, SUPER_ADMIN_ID)
-    bot.reply_to(message, f"✅ @{username} принудительно добавлен в админы! Теперь все команды должны работать.")
+    bot.reply_to(message, f"✅ @{username} принудительно добавлен в админы!")
 
 # ============================================
 # CALLBACK HANDLERS
@@ -1143,6 +1777,43 @@ def handle_callback(call):
     
     elif call.data == "logs_menu":
         show_logs(call.message)
+    
+    elif call.data.startswith('quiz_'):
+        parts = call.data.split('_')
+        question_id = int(parts[1])
+        answer_idx = int(parts[2])
+        
+        db.cursor.execute('SELECT answer, options FROM quiz_questions WHERE id = ?', (question_id,))
+        result = db.cursor.fetchone()
+        if result:
+            correct_answer = result[0]
+            options = json.loads(result[1])
+            selected = options[answer_idx] if answer_idx < len(options) else ""
+            
+            if selected == correct_answer:
+                bot.answer_callback_query(call.id, "✅ Правильно! +10 очков")
+                
+                # Обновляем статистику
+                db.update_game_stats(chat_id, user_id, get_username(call.from_user), 'quiz', won=True, score=10)
+                
+                # Проверка на достижение
+                user = db.get_user(chat_id, user_id)
+                if user['games_played'] + 1 >= 10:
+                    if db.add_achievement(chat_id, user_id, 'game_master'):
+                        bot.send_message(chat_id, f"🏆 @{get_username(call.from_user)} получил достижение: {ACHIEVEMENTS['game_master']['emoji']} {ACHIEVEMENTS['game_master']['name']}!")
+                
+                bot.edit_message_text(
+                    f"✅ Правильно! +10 очков\n\nВопрос: {call.message.text}",
+                    chat_id,
+                    call.message.message_id
+                )
+            else:
+                bot.answer_callback_query(call.id, f"❌ Неправильно! Правильный ответ: {correct_answer}")
+                bot.edit_message_text(
+                    f"❌ Неправильно!\nПравильный ответ: {correct_answer}\n\n{call.message.text}",
+                    chat_id,
+                    call.message.message_id
+                )
 
 # ============================================
 # ОБРАБОТЧИКИ СООБЩЕНИЙ
@@ -1155,11 +1826,9 @@ def welcome_new(message):
     for member in message.new_chat_members:
         if member.id == bot.get_me().id:
             bot.reply_to(message, 
-                "🤖 **IMBA АНТИСПАМ АКТИВИРОВАН!**\n"
+                "🤖 **MEGA ULTRA IMBA BOT АКТИВИРОВАН!**\n"
+                "🛡️ Антиспам | 📊 Статистика | 🎮 Игры | 📅 События\n"
                 "👑 /functions - управление\n"
-                "🔨 /mute - ручной мут\n"
-                "⚙️ /settings - настройки\n"
-                "📢 /report - пожаловаться\n"
                 "🆘 /fix - если не работают команды",
                 parse_mode='Markdown'
             )
@@ -1179,32 +1848,85 @@ def handle_message(message):
         bot.reply_to(message, "🤖 Добавь меня в группу!")
         return
     
-    # Очистка старых жалоб (раз в 100 сообщений)
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    username = get_username(message.from_user)
+    first_name = message.from_user.first_name or ""
+    
+    # Обновляем активность пользователя (для системы уровней)
+    settings = db.get_group_settings(chat_id)
+    if settings.get('leveling_enabled', True):
+        new_level = db.update_user_activity(chat_id, user_id, username, first_name)
+        if new_level:
+            bot.send_message(chat_id, f"🌟 @{username} достиг {new_level} уровня!")
+        
+        # Проверка на первые сообщения
+        user = db.get_user(chat_id, user_id)
+        if user['messages'] == 1:
+            if db.add_achievement(chat_id, user_id, 'first_message'):
+                bot.send_message(chat_id, f"🏆 @{username} получил достижение: {ACHIEVEMENTS['first_message']['emoji']} {ACHIEVEMENTS['first_message']['name']}!")
+        elif user['messages'] == 100:
+            if db.add_achievement(chat_id, user_id, '100_messages'):
+                bot.send_message(chat_id, f"🏆 @{username} получил достижение: {ACHIEVEMENTS['100_messages']['emoji']} {ACHIEVEMENTS['100_messages']['name']}!")
+        elif user['messages'] == 1000:
+            if db.add_achievement(chat_id, user_id, '1000_messages'):
+                bot.send_message(chat_id, f"🏆 @{username} получил достижение: {ACHIEVEMENTS['1000_messages']['emoji']} {ACHIEVEMENTS['1000_messages']['name']}!")
+        
+        # Проверка на ночную сову
+        current_hour = datetime.now().hour
+        if current_hour >= 0 and current_hour <= 5:
+            if db.add_achievement(chat_id, user_id, 'night_owl'):
+                bot.send_message(chat_id, f"🏆 @{username} получил достижение: {ACHIEVEMENTS['night_owl']['emoji']} {ACHIEVEMENTS['night_owl']['name']}!")
+    
+    # Очистка старых жалоб
     if random.randint(1, 100) == 1:
-        current_time = time.time()
-        keys_to_remove = []
-        for (c_id, msg_id), users in reported_messages.items():
-            if c_id == message.chat.id:
-                # Если прошло больше часа, очищаем
-                keys_to_remove.append((c_id, msg_id))
+        keys_to_remove = [key for key in reported_messages if key[0] == chat_id]
         for key in keys_to_remove:
             reported_messages.pop(key, None)
     
+    # Проверка на спам
     is_allowed, warning = spam_filter.check_message(message)
     
     if not is_allowed and warning:
         try:
-            bot.delete_message(message.chat.id, message.message_id)
-            bot.send_message(message.chat.id, warning)
+            bot.delete_message(chat_id, message.message_id)
+            bot.send_message(chat_id, warning)
         except:
             pass
+
+# ============================================
+# ФОНОВЫЙ ПРОЦЕСС ДЛЯ НАПОМИНАНИЙ
+# ============================================
+def check_reminders():
+    """Проверка и отправка напоминаний"""
+    while True:
+        try:
+            reminders = db.get_due_reminders()
+            for reminder in reminders:
+                try:
+                    bot.send_message(
+                        reminder['chat_id'],
+                        f"⏰ **НАПОМИНАНИЕ**\n\n@{reminder['username']}, {reminder['reminder_text']}",
+                        parse_mode='Markdown'
+                    )
+                    db.mark_reminder_done(reminder['id'])
+                except:
+                    pass
+            time.sleep(60)  # Проверка раз в минуту
+        except:
+            time.sleep(60)
+
+# Запуск фонового процесса
+import threading
+reminder_thread = threading.Thread(target=check_reminders, daemon=True)
+reminder_thread.start()
 
 # ============================================
 # ЗАПУСК НА RENDER
 # ============================================
 @app.route('/')
 def home():
-    return "🔥 IMBA ANTISPAM БОТ РАБОТАЕТ! 🔥", 200
+    return "🔥 MEGA ULTRA IMBA БОТ РАБОТАЕТ! 🔥", 200
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
@@ -1232,7 +1954,7 @@ def set_webhook():
     return True
 
 if __name__ == '__main__':
-    print("🔥 ЗАПУСК IMBA ANTISPAM БОТА")
+    print("🔥 ЗАПУСК MEGA ULTRA IMBA БОТА")
     set_webhook()
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
