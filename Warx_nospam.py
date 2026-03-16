@@ -33,7 +33,6 @@ class Database:
         print("✅ База данных подключена")
     
     def create_tables(self):
-        # Таблица настроек групп
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_settings (
                 chat_id INTEGER PRIMARY KEY,
@@ -56,7 +55,6 @@ class Database:
             )
         ''')
         
-        # Таблица админов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_admins (
                 chat_id INTEGER,
@@ -68,7 +66,6 @@ class Database:
             )
         ''')
         
-        # Таблица нарушителей
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS offenders (
                 chat_id INTEGER,
@@ -83,7 +80,6 @@ class Database:
             )
         ''')
         
-        # Таблица запрещенных слов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS ban_words (
                 chat_id INTEGER,
@@ -93,7 +89,6 @@ class Database:
             )
         ''')
         
-        # Таблица логов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,7 +101,6 @@ class Database:
             )
         ''')
         
-        # Таблица приветствий
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS greetings (
                 chat_id INTEGER PRIMARY KEY,
@@ -244,7 +238,12 @@ class Database:
     def is_muted(self, chat_id, user_id):
         offender = self.get_offender(chat_id, user_id)
         if offender and offender['muted_until']:
-            return datetime.now() < datetime.fromisoformat(offender['muted_until'])
+            mute_time = datetime.fromisoformat(offender['muted_until'])
+            if datetime.now() < mute_time:
+                return True
+            else:
+                self.unmute_user(chat_id, user_id)
+                return False
         return False
     
     def reset_warns(self, chat_id, user_id):
@@ -355,6 +354,9 @@ class AntiSpam:
             offender = db.get_offender(chat_id, user_id)
             mute_until = datetime.fromisoformat(offender['muted_until'])
             remaining = int((mute_until - datetime.now()).total_seconds() / 60)
+            if remaining <= 0:
+                db.unmute_user(chat_id, user_id)
+                return True, None
             reason = offender.get('last_reason', 'неизвестно')
             return False, f"🔇 **ВЫ В МУТЕ!**\nОсталось: {remaining} мин\nПричина: {reason}"
         
@@ -372,7 +374,7 @@ class AntiSpam:
         if settings['flood_enabled']:
             recent = [msg for msg in self.user_messages[key] if current_time - msg['time'] < settings['time_window']]
             if len(recent) >= settings['max_messages']:
-                warns, mute = db.add_warn(chat_id, user_id, username, f"Флуд")
+                warns, mute = db.add_warn(chat_id, user_id, username, "Флуд")
                 warning = random.choice(self.warnings['flood']).format(msgs=settings['max_messages'], sec=settings['time_window'])
                 if mute:
                     warning += f"\n🔇 **АВТО-МУТ на {settings['mute_time']//60} мин!**"
@@ -383,7 +385,7 @@ class AntiSpam:
         if settings['caps_enabled'] and len(text) > 5:
             upper = sum(1 for c in text if c.isupper()) / len(text) * 100
             if upper > settings['caps_limit']:
-                warns, mute = db.add_warn(chat_id, user_id, username, f"Капс")
+                warns, mute = db.add_warn(chat_id, user_id, username, "Капс")
                 warning = random.choice(self.warnings['caps'])
                 if mute:
                     warning += f"\n🔇 **АВТО-МУТ на {settings['mute_time']//60} мин!**"
@@ -394,7 +396,7 @@ class AntiSpam:
         if settings['emoji_enabled']:
             emoji = self.count_emojis(text)
             if emoji > settings['emoji_limit']:
-                warns, mute = db.add_warn(chat_id, user_id, username, f"Эмодзи")
+                warns, mute = db.add_warn(chat_id, user_id, username, "Эмодзи")
                 warning = random.choice(self.warnings['emoji']) + f"\n😊 Эмодзи: {emoji}"
                 if mute:
                     warning += f"\n🔇 **АВТО-МУТ на {settings['mute_time']//60} мин!**"
@@ -427,7 +429,7 @@ class AntiSpam:
             ban_words = db.get_ban_words(chat_id)
             has_swear, word = self.has_swear(text, ban_words)
             if has_swear:
-                warns, mute = db.add_warn(chat_id, user_id, username, f"Мат")
+                warns, mute = db.add_warn(chat_id, user_id, username, "Мат")
                 warning = random.choice(self.warnings['swear']) + f"\n🔴 Слово: {word}"
                 if mute:
                     warning += f"\n🔇 **АВТО-МУТ на {settings['mute_time']//60} мин!**"
@@ -765,7 +767,7 @@ def greeting_command(message):
         db.set_greeting(chat_id, greeting)
         bot.reply_to(message, f"✅ Приветствие установлено:\n{greeting}")
     except:
-        bot.reply_to(message, "❌ Использование: /greeting [текст] (используй {user} для имени)")
+        bot.reply_to(message, "❌ Использование: /greeting [текст] (используй {user} для имени")
 
 @bot.message_handler(commands=['antispam_on'])
 def antispam_on(message):
