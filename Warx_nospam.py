@@ -350,6 +350,7 @@ class AntiSpam:
         if db.is_group_admin(chat_id, user_id):
             return True, None
         
+        # ПРОВЕРКА НА МУТ - БЕЗ УВЕДОМЛЕНИЙ
         if db.is_muted(chat_id, user_id):
             offender = db.get_offender(chat_id, user_id)
             mute_until = datetime.fromisoformat(offender['muted_until'])
@@ -357,8 +358,8 @@ class AntiSpam:
             if remaining <= 0:
                 db.unmute_user(chat_id, user_id)
                 return True, None
-            reason = offender.get('last_reason', 'неизвестно')
-            return False, f"🔇 **ВЫ В МУТЕ!**\nОсталось: {remaining} мин\nПричина: {reason}"
+            # Просто удаляем сообщение, НИЧЕГО не отправляем
+            return False, None
         
         current_time = time.time()
         key = f"{chat_id}:{user_id}"
@@ -459,7 +460,7 @@ def get_username(user):
 @bot.message_handler(commands=['start'])
 def start(message):
     text = """
-🔥 **АНТИСПАМ БОТ** 🔥
+🔥 **SHARKYSPAM БОТ** 🔥
 
 **🤖 ФУНКЦИИ:**
 • Анти-флуд (4 за 3 сек)
@@ -940,7 +941,7 @@ def welcome_new(message):
     for member in message.new_chat_members:
         if member.id == bot.get_me().id:
             bot.reply_to(message, 
-                "🤖 **АНТИСПАМ БОТ АКТИВИРОВАН!**\n"
+                "🦈 **SHARKYSPAM БОТ АКТИВИРОВАН!**\n"
                 "👑 /functions - управление\n"
                 "🔨 /mute - ручной мут\n"
                 "⚙️ /settings - настройки",
@@ -959,7 +960,7 @@ def handle_message(message):
         return
     
     if message.chat.type == 'private':
-        bot.reply_to(message, "🤖 Добавь меня в группу!")
+        bot.reply_to(message, "🦈 Добавь меня в группу!")
         return
     
     is_allowed, warning = spam_filter.check_message(message)
@@ -970,13 +971,19 @@ def handle_message(message):
             bot.send_message(message.chat.id, warning)
         except:
             pass
+    elif not is_allowed and warning is None:
+        # Если warning = None, просто удаляем сообщение без уведомления
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except:
+            pass
 
 # ============================================
 # ЗАПУСК НА RENDER
 # ============================================
 @app.route('/')
 def home():
-    return "🔥 АНТИСПАМ БОТ РАБОТАЕТ! 🔥", 200
+    return "🦈 SHARKYSPAM БОТ РАБОТАЕТ! 🔥", 200
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
@@ -1004,7 +1011,7 @@ def set_webhook():
     return True
 
 if __name__ == '__main__':
-    print("🔥 ЗАПУСК АНТИСПАМ БОТА")
+    print("🔥 ЗАПУСК SHARKYSPAM БОТА")
     set_webhook()
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
