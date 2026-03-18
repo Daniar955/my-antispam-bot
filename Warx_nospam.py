@@ -4,10 +4,12 @@ import time
 from collections import defaultdict
 import re
 import random
-import sqlite3
 import os
 from datetime import datetime, timedelta
 from flask import Flask, request
+import psycopg2
+import psycopg2.extras
+from urllib.parse import urlparse
 
 # ============================================
 # НАСТРОЙКИ
@@ -22,54 +24,76 @@ bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
 # ============================================
+# ПОДКЛЮЧЕНИЕ К POSTGRESQL
+# ============================================
+def get_db_connection():
+    """Создает подключение к PostgreSQL"""
+    db_url = os.environ.get('DATABASE_URL')
+    if not db_url:
+        raise ValueError("❌ Нет DATABASE_URL в переменных окружения!")
+    
+    result = urlparse(db_url)
+    conn = psycopg2.connect(
+        database=result.path[1:],
+        user=result.username,
+        password=result.password,
+        host=result.hostname,
+        port=result.port
+    )
+    conn.autocommit = True
+    return conn
+
+# ============================================
 # БАЗА ДАННЫХ
 # ============================================
 class Database:
     def __init__(self):
-        db_path = os.path.join('/tmp', 'antispam.db')
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.cursor = self.conn.cursor()
+        self.conn = get_db_connection()
+        self.cursor = self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         self.create_tables()
-        print("✅ База данных подключена")
+        print("✅ База данных PostgreSQL подключена")
     
     def create_tables(self):
+        # Таблица настроек групп
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_settings (
-                chat_id INTEGER PRIMARY KEY,
-                enabled BOOLEAN DEFAULT 1,
-                flood_enabled BOOLEAN DEFAULT 1,
-                caps_enabled BOOLEAN DEFAULT 1,
-                emoji_enabled BOOLEAN DEFAULT 1,
-                repeat_enabled BOOLEAN DEFAULT 1,
-                links_enabled BOOLEAN DEFAULT 1,
-                swear_enabled BOOLEAN DEFAULT 1,
+                chat_id BIGINT PRIMARY KEY,
+                enabled BOOLEAN DEFAULT TRUE,
+                flood_enabled BOOLEAN DEFAULT TRUE,
+                caps_enabled BOOLEAN DEFAULT TRUE,
+                emoji_enabled BOOLEAN DEFAULT TRUE,
+                repeat_enabled BOOLEAN DEFAULT TRUE,
+                links_enabled BOOLEAN DEFAULT TRUE,
+                swear_enabled BOOLEAN DEFAULT TRUE,
                 max_messages INTEGER DEFAULT 4,
                 time_window INTEGER DEFAULT 3,
                 caps_limit INTEGER DEFAULT 50,
                 emoji_limit INTEGER DEFAULT 5,
                 link_kd INTEGER DEFAULT 10,
                 warn_limit INTEGER DEFAULT 5,
-                auto_mute BOOLEAN DEFAULT 1,
+                auto_mute BOOLEAN DEFAULT TRUE,
                 mute_time INTEGER DEFAULT 60,
                 max_length INTEGER DEFAULT 1000
             )
         ''')
         
+        # Таблица админов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_admins (
-                chat_id INTEGER,
-                user_id INTEGER,
+                chat_id BIGINT,
+                user_id BIGINT,
                 username TEXT,
-                added_by INTEGER,
+                added_by BIGINT,
                 date_added TIMESTAMP,
                 PRIMARY KEY (chat_id, user_id)
             )
         ''')
         
+        # Таблица нарушителей
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS offenders (
-                chat_id INTEGER,
-                user_id INTEGER,
+                chat_id BIGINT,
+                user_id BIGINT,
                 username TEXT,
                 warns INTEGER DEFAULT 0,
                 last_offense TIMESTAMP,
@@ -80,20 +104,22 @@ class Database:
             )
         ''')
         
+        # Таблица запрещенных слов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS ban_words (
-                chat_id INTEGER,
+                chat_id BIGINT,
                 word TEXT,
-                added_by INTEGER,
+                added_by BIGINT,
                 PRIMARY KEY (chat_id, word)
             )
         ''')
         
+        # Таблица логов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER,
-                user_id INTEGER,
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT,
+                user_id BIGINT,
                 username TEXT,
                 action TEXT,
                 reason TEXT,
@@ -101,10 +127,11 @@ class Database:
             )
         ''')
         
+        # Таблица приветствий
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS greetings (
-                chat_id INTEGER PRIMARY KEY,
-                message TEXT DEFAULT "👋 Добро пожаловать, {user}!"
+                chat_id BIGINT PRIMARY KEY,
+                message TEXT DEFAULT '👋 Добро пожаловать, {user}!'
             )
         ''')
         
@@ -112,90 +139,99 @@ class Database:
         print("✅ Все таблицы созданы")
     
     def get_group_settings(self, chat_id):
-        self.cursor.execute('SELECT * FROM group_settings WHERE chat_id = ?', (chat_id,))
+        self.cursor.execute('SELECT * FROM group_settings WHERE chat_id = %s', (chat_id,))
         result = self.cursor.fetchone()
         
         if not result:
-            self.cursor.execute('INSERT INTO group_settings (chat_id) VALUES (?)', (chat_id,))
-            self.conn.commit()
-            self.cursor.execute('SELECT * FROM group_settings WHERE chat_id = ?', (chat_id,))
+            self.cursor.execute('''
+                INSERT INTO group_settings (chat_id) 
+                VALUES (%s) RETURNING *
+            ''', (chat_id,))
             result = self.cursor.fetchone()
         
-        columns = [description[0] for description in self.cursor.description]
-        return dict(zip(columns, result))
+        return dict(result)
     
     def update_setting(self, chat_id, setting, value):
-        self.cursor.execute(f'UPDATE group_settings SET {setting} = ? WHERE chat_id = ?', (value, chat_id))
+        self.cursor.execute(f'UPDATE group_settings SET {setting} = %s WHERE chat_id = %s', (value, chat_id))
         self.conn.commit()
     
     def toggle_function(self, chat_id, function_name):
         current = self.get_group_settings(chat_id)[function_name]
-        self.update_setting(chat_id, function_name, 0 if current else 1)
+        self.update_setting(chat_id, function_name, not current)
         return not current
     
     def is_group_admin(self, chat_id, user_id):
         if user_id == SUPER_ADMIN_ID:
             return True
-        self.cursor.execute('SELECT * FROM group_admins WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
+        self.cursor.execute('SELECT * FROM group_admins WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
         return self.cursor.fetchone() is not None
     
     def add_group_admin(self, chat_id, user_id, username, added_by):
         self.cursor.execute('''
-            INSERT OR REPLACE INTO group_admins (chat_id, user_id, username, added_by, date_added)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO group_admins (chat_id, user_id, username, added_by, date_added)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (chat_id, user_id) DO UPDATE
+            SET username = EXCLUDED.username, added_by = EXCLUDED.added_by, date_added = EXCLUDED.date_added
         ''', (chat_id, user_id, username, added_by, datetime.now()))
         self.conn.commit()
     
     def remove_group_admin(self, chat_id, user_id):
-        self.cursor.execute('DELETE FROM group_admins WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
+        self.cursor.execute('DELETE FROM group_admins WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
         self.conn.commit()
     
     def get_group_admins(self, chat_id):
-        self.cursor.execute('SELECT * FROM group_admins WHERE chat_id = ?', (chat_id,))
+        self.cursor.execute('SELECT * FROM group_admins WHERE chat_id = %s', (chat_id,))
         result = self.cursor.fetchall()
-        columns = [description[0] for description in self.cursor.description]
-        return [dict(zip(columns, row)) for row in result]
+        return [dict(row) for row in result]
     
     def get_ban_words(self, chat_id):
-        self.cursor.execute('SELECT word FROM ban_words WHERE chat_id = ?', (chat_id,))
+        self.cursor.execute('SELECT word FROM ban_words WHERE chat_id = %s', (chat_id,))
         return [row[0] for row in self.cursor.fetchall()]
     
     def add_ban_word(self, chat_id, word, added_by):
         self.cursor.execute('''
-            INSERT OR REPLACE INTO ban_words (chat_id, word, added_by)
-            VALUES (?, ?, ?)
+            INSERT INTO ban_words (chat_id, word, added_by)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (chat_id, word) DO UPDATE
+            SET added_by = EXCLUDED.added_by
         ''', (chat_id, word.lower(), added_by))
         self.conn.commit()
     
     def remove_ban_word(self, chat_id, word):
-        self.cursor.execute('DELETE FROM ban_words WHERE chat_id = ? AND word = ?', (chat_id, word.lower()))
+        self.cursor.execute('DELETE FROM ban_words WHERE chat_id = %s AND word = %s', (chat_id, word.lower()))
         self.conn.commit()
     
     def add_warn(self, chat_id, user_id, username, reason):
-        offender = self.get_offender(chat_id, user_id)
+        # Получаем текущие данные нарушителя
+        self.cursor.execute('SELECT * FROM offenders WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
+        offender = self.cursor.fetchone()
         settings = self.get_group_settings(chat_id)
         
         if offender:
+            new_warns = offender['warns'] + 1
             self.cursor.execute('''
                 UPDATE offenders 
-                SET warns = warns + 1, last_offense = ?, username = ?, last_reason = ?
-                WHERE chat_id = ? AND user_id = ?
+                SET warns = warns + 1, last_offense = %s, username = %s, last_reason = %s
+                WHERE chat_id = %s AND user_id = %s
+                RETURNING warns
             ''', (datetime.now(), username, reason, chat_id, user_id))
-            new_warns = offender['warns'] + 1
+            new_warns = self.cursor.fetchone()[0]
         else:
+            new_warns = 1
             self.cursor.execute('''
                 INSERT INTO offenders (chat_id, user_id, username, warns, last_offense, join_time, last_reason)
-                VALUES (?, ?, ?, 1, ?, ?, ?)
+                VALUES (%s, %s, %s, 1, %s, %s, %s)
             ''', (chat_id, user_id, username, datetime.now(), datetime.now(), reason))
-            new_warns = 1
         
         self.log_action(chat_id, user_id, username, 'WARN', reason)
         self.conn.commit()
         
         if settings['auto_mute'] and new_warns >= settings['warn_limit']:
             mute_until = datetime.now() + timedelta(seconds=settings['mute_time'])
-            self.cursor.execute('UPDATE offenders SET muted_until = ? WHERE chat_id = ? AND user_id = ?', 
-                              (mute_until, chat_id, user_id))
+            self.cursor.execute('''
+                UPDATE offenders SET muted_until = %s 
+                WHERE chat_id = %s AND user_id = %s
+            ''', (mute_until, chat_id, user_id))
             self.conn.commit()
             return new_warns, mute_until
         
@@ -205,16 +241,18 @@ class Database:
         seconds = minutes * 60
         mute_until = datetime.now() + timedelta(seconds=seconds)
         
-        offender = self.get_offender(chat_id, user_id)
+        self.cursor.execute('SELECT * FROM offenders WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
+        offender = self.cursor.fetchone()
+        
         if offender:
             self.cursor.execute('''
-                UPDATE offenders SET muted_until = ?, last_offense = ?, username = ?, last_reason = ?
-                WHERE chat_id = ? AND user_id = ?
+                UPDATE offenders SET muted_until = %s, last_offense = %s, username = %s, last_reason = %s
+                WHERE chat_id = %s AND user_id = %s
             ''', (mute_until, datetime.now(), username, reason, chat_id, user_id))
         else:
             self.cursor.execute('''
                 INSERT INTO offenders (chat_id, user_id, username, warns, last_offense, join_time, muted_until, last_reason)
-                VALUES (?, ?, ?, 0, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, 0, %s, %s, %s, %s)
             ''', (chat_id, user_id, username, datetime.now(), datetime.now(), mute_until, reason))
         
         self.log_action(chat_id, user_id, username, 'MUTE', f"{reason} на {minutes} мин")
@@ -222,24 +260,22 @@ class Database:
         return mute_until
     
     def unmute_user(self, chat_id, user_id):
-        self.cursor.execute('UPDATE offenders SET muted_until = NULL WHERE chat_id = ? AND user_id = ?', 
-                          (chat_id, user_id))
+        self.cursor.execute('''
+            UPDATE offenders SET muted_until = NULL 
+            WHERE chat_id = %s AND user_id = %s
+        ''', (chat_id, user_id))
         self.log_action(chat_id, user_id, "unknown", 'UNMUTE', "Снятие мута")
         self.conn.commit()
     
     def get_offender(self, chat_id, user_id):
-        self.cursor.execute('SELECT * FROM offenders WHERE chat_id = ? AND user_id = ?', (chat_id, user_id))
+        self.cursor.execute('SELECT * FROM offenders WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
         result = self.cursor.fetchone()
-        if result:
-            columns = [description[0] for description in self.cursor.description]
-            return dict(zip(columns, result))
-        return None
+        return dict(result) if result else None
     
     def is_muted(self, chat_id, user_id):
         offender = self.get_offender(chat_id, user_id)
         if offender and offender['muted_until']:
-            mute_time = datetime.fromisoformat(offender['muted_until'])
-            if datetime.now() < mute_time:
+            if datetime.now() < offender['muted_until']:
                 return True
             else:
                 self.unmute_user(chat_id, user_id)
@@ -247,34 +283,37 @@ class Database:
         return False
     
     def reset_warns(self, chat_id, user_id):
-        self.cursor.execute('UPDATE offenders SET warns = 0 WHERE chat_id = ? AND user_id = ?', 
-                          (chat_id, user_id))
+        self.cursor.execute('''
+            UPDATE offenders SET warns = 0 
+            WHERE chat_id = %s AND user_id = %s
+        ''', (chat_id, user_id))
         self.unmute_user(chat_id, user_id)
         self.conn.commit()
     
     def log_action(self, chat_id, user_id, username, action, reason):
         self.cursor.execute('''
             INSERT INTO logs (chat_id, user_id, username, action, reason, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
         ''', (chat_id, user_id, username, action, reason, datetime.now()))
         self.conn.commit()
     
     def get_logs(self, chat_id, limit=20):
         self.cursor.execute('''
-            SELECT * FROM logs WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?
+            SELECT * FROM logs WHERE chat_id = %s 
+            ORDER BY timestamp DESC LIMIT %s
         ''', (chat_id, limit))
         result = self.cursor.fetchall()
-        columns = [description[0] for description in self.cursor.description]
-        return [dict(zip(columns, row)) for row in result]
+        return [dict(row) for row in result]
     
     def set_greeting(self, chat_id, message):
         self.cursor.execute('''
-            INSERT OR REPLACE INTO greetings (chat_id, message) VALUES (?, ?)
+            INSERT INTO greetings (chat_id, message) VALUES (%s, %s)
+            ON CONFLICT (chat_id) DO UPDATE SET message = EXCLUDED.message
         ''', (chat_id, message))
         self.conn.commit()
     
     def get_greeting(self, chat_id):
-        self.cursor.execute('SELECT message FROM greetings WHERE chat_id = ?', (chat_id,))
+        self.cursor.execute('SELECT message FROM greetings WHERE chat_id = %s', (chat_id,))
         result = self.cursor.fetchone()
         return result[0] if result else "👋 Добро пожаловать, {user}!"
 
@@ -353,7 +392,7 @@ class AntiSpam:
         # ПРОВЕРКА НА МУТ - БЕЗ УВЕДОМЛЕНИЙ
         if db.is_muted(chat_id, user_id):
             offender = db.get_offender(chat_id, user_id)
-            mute_until = datetime.fromisoformat(offender['muted_until'])
+            mute_until = offender['muted_until']
             remaining = int((mute_until - datetime.now()).total_seconds() / 60)
             if remaining <= 0:
                 db.unmute_user(chat_id, user_id)
@@ -365,7 +404,7 @@ class AntiSpam:
         key = f"{chat_id}:{user_id}"
         
         offender = db.get_offender(chat_id, user_id)
-        join_time = datetime.fromisoformat(offender['join_time']) if offender else datetime.now()
+        join_time = offender['join_time'] if offender else datetime.now()
         
         self.user_messages[key] = [msg for msg in self.user_messages[key] if current_time - msg['time'] < 60]
         
@@ -460,7 +499,7 @@ def get_username(user):
 @bot.message_handler(commands=['start'])
 def start(message):
     text = """
-🔥 **SHARKYSPAM БОТ** 🔥
+🦈 **SHARKYSPAM БОТ** 🔥
 
 **🤖 ФУНКЦИИ:**
 • Анти-флуд (4 за 3 сек)
@@ -585,7 +624,7 @@ def logs_command(message):
     text = "📋 **ПОСЛЕДНИЕ ДЕЙСТВИЯ:**\n\n"
     for log in logs:
         emoji = "⚠️" if log['action'] == 'WARN' else "🔇" if log['action'] == 'MUTE' else "✅"
-        text += f"{emoji} @{log['username']}: {log['reason']}\n   🕒 {log['timestamp'][:19]}\n\n"
+        text += f"{emoji} @{log['username']}: {log['reason']}\n   🕒 {log['timestamp'].strftime('%Y-%m-%d %H:%M') if log['timestamp'] else 'неизвестно'}\n\n"
     
     bot.reply_to(message, text, parse_mode='Markdown')
 
@@ -777,7 +816,7 @@ def antispam_on(message):
     if not is_admin(chat_id, user_id):
         bot.reply_to(message, "❌ Только админы!")
         return
-    db.update_setting(chat_id, 'enabled', 1)
+    db.update_setting(chat_id, 'enabled', True)
     bot.reply_to(message, "🟢 **АНТИСПАМ ВКЛЮЧЕН!**", parse_mode='Markdown')
 
 @bot.message_handler(commands=['antispam_off'])
@@ -787,9 +826,10 @@ def antispam_off(message):
     if not is_admin(chat_id, user_id):
         bot.reply_to(message, "❌ Только админы!")
         return
-    db.update_setting(chat_id, 'enabled', 0)
+    db.update_setting(chat_id, 'enabled', False)
     bot.reply_to(message, "🔴 **АНТИСПАМ ВЫКЛЮЧЕН!**", parse_mode='Markdown')
 
+# Настройки параметров (оставлены без изменений, только %s вместо ?)
 @bot.message_handler(commands=['set_max_msgs'])
 def set_max_msgs(message):
     chat_id = message.chat.id
@@ -890,8 +930,7 @@ def set_mute_time(message):
     try:
         minutes = int(message.text.split()[1])
         if 1 <= minutes <= 60:
-            seconds = minutes * 60
-            db.update_setting(chat_id, 'mute_time', seconds)
+            db.update_setting(chat_id, 'mute_time', minutes * 60)
             bot.reply_to(message, f"✅ Время мута: {minutes} мин")
     except:
         bot.reply_to(message, "❌ /set_mute_time [1-60] (МИНУТЫ)")
