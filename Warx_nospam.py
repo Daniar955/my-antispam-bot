@@ -241,22 +241,19 @@ class Database:
         seconds = minutes * 60
         mute_until = datetime.now() + timedelta(seconds=seconds)
         
-        self.cursor.execute('SELECT * FROM offenders WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
-        offender = self.cursor.fetchone()
-        
-        if offender:
-            self.cursor.execute('''
-                UPDATE offenders SET muted_until = %s, last_offense = %s, username = %s, last_reason = %s
-                WHERE chat_id = %s AND user_id = %s
-            ''', (mute_until, datetime.now(), username, reason, chat_id, user_id))
-        else:
-            self.cursor.execute('''
-                INSERT INTO offenders (chat_id, user_id, username, warns, last_offense, join_time, muted_until, last_reason)
-                VALUES (%s, %s, %s, 0, %s, %s, %s, %s)
-            ''', (chat_id, user_id, username, datetime.now(), datetime.now(), mute_until, reason))
+        self.cursor.execute('''
+            INSERT INTO offenders (chat_id, user_id, username, warns, last_offense, join_time, muted_until, last_reason)
+            VALUES (%s, %s, %s, 0, %s, %s, %s, %s)
+            ON CONFLICT (chat_id, user_id) DO UPDATE
+            SET muted_until = EXCLUDED.muted_until,
+                last_offense = EXCLUDED.last_offense,
+                username = EXCLUDED.username,
+                last_reason = EXCLUDED.last_reason
+        ''', (chat_id, user_id, username, datetime.now(), datetime.now(), mute_until, reason))
         
         self.log_action(chat_id, user_id, username, 'MUTE', f"{reason} на {minutes} мин")
         self.conn.commit()
+        print(f"✅ Пользователь {username} замучен до {mute_until}")
         return mute_until
     
     def unmute_user(self, chat_id, user_id):
@@ -266,6 +263,7 @@ class Database:
         ''', (chat_id, user_id))
         self.log_action(chat_id, user_id, "unknown", 'UNMUTE', "Снятие мута")
         self.conn.commit()
+        print(f"✅ Пользователь {user_id} размучен")
     
     def get_offender(self, chat_id, user_id):
         self.cursor.execute('SELECT * FROM offenders WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
@@ -273,9 +271,20 @@ class Database:
         return dict(result) if result else None
     
     def is_muted(self, chat_id, user_id):
-        offender = self.get_offender(chat_id, user_id)
-        if offender and offender['muted_until']:
-            if datetime.now() < offender['muted_until']:
+        self.cursor.execute('SELECT muted_until FROM offenders WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
+        result = self.cursor.fetchone()
+        
+        if result and result[0]:
+            mute_until = result[0]
+            now = datetime.now()
+            
+            # Приводим к одинаковому формату времени
+            if mute_until.tzinfo:
+                now = now.replace(tzinfo=mute_until.tzinfo)
+            
+            if now < mute_until:
+                remaining_seconds = int((mute_until - now).total_seconds())
+                print(f"🔇 Пользователь {user_id} в муте, осталось {remaining_seconds} сек")
                 return True
             else:
                 self.unmute_user(chat_id, user_id)
@@ -389,16 +398,10 @@ class AntiSpam:
         if db.is_group_admin(chat_id, user_id):
             return True, None
         
-        # ПРОВЕРКА НА МУТ - БЕЗ УВЕДОМЛЕНИЙ
+        # ПРОВЕРКА НА МУТ - СРАЗУ ПОСЛЕ ПРОВЕРКИ НА АДМИНА
         if db.is_muted(chat_id, user_id):
-            offender = db.get_offender(chat_id, user_id)
-            mute_until = offender['muted_until']
-            remaining = int((mute_until - datetime.now()).total_seconds() / 60)
-            if remaining <= 0:
-                db.unmute_user(chat_id, user_id)
-                return True, None
-            # Просто удаляем сообщение, НИЧЕГО не отправляем
-            return False, None
+            print(f"🚫 Заблокировано сообщение от замученного {username}")
+            return False, None  # Просто удаляем, без уведомления
         
         current_time = time.time()
         key = f"{chat_id}:{user_id}"
@@ -535,12 +538,49 @@ def start(message):
 /set_warn_limit - лимит предупреждений
 /set_mute_time - время мута (мин)
 /set_max_len - макс длина сообщения
+/check_mute - проверить статус мута
     """
     bot.reply_to(message, text, parse_mode='Markdown')
 
 @bot.message_handler(commands=['help'])
 def help_command(message):
     start(message)
+
+@bot.message_handler(commands=['check_mute'])
+def check_mute(message):
+    """Проверить статус мута (только для админов)"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
+        return
+    
+    target = message.reply_to_message.from_user
+    offender = db.get_offender(chat_id, target.id)
+    
+    if offender and offender['muted_until']:
+        mute_until = offender['muted_until']
+        now = datetime.now()
+        
+        if mute_until.tzinfo:
+            now = now.replace(tzinfo=mute_until.tzinfo)
+        
+        remaining_seconds = int((mute_until - now).total_seconds())
+        remaining_minutes = remaining_seconds / 60
+        
+        bot.reply_to(message, 
+            f"🔇 Статус @{get_username(target)}:\n"
+            f"Мут до: {mute_until}\n"
+            f"Осталось секунд: {remaining_seconds}\n"
+            f"Осталось минут: {remaining_minutes:.2f}\n"
+            f"Причина: {offender.get('last_reason', 'неизвестно')}")
+    else:
+        bot.reply_to(message, f"✅ @{get_username(target)} не в муте")
 
 @bot.message_handler(commands=['functions'])
 def functions_menu(message):
@@ -829,7 +869,7 @@ def antispam_off(message):
     db.update_setting(chat_id, 'enabled', False)
     bot.reply_to(message, "🔴 **АНТИСПАМ ВЫКЛЮЧЕН!**", parse_mode='Markdown')
 
-# Настройки параметров (оставлены без изменений, только %s вместо ?)
+# Настройки параметров
 @bot.message_handler(commands=['set_max_msgs'])
 def set_max_msgs(message):
     chat_id = message.chat.id
