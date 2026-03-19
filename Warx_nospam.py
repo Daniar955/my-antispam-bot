@@ -10,6 +10,8 @@ from flask import Flask, request
 import psycopg2
 import psycopg2.extras
 from urllib.parse import urlparse
+import threading
+import queue
 
 # ============================================
 # НАСТРОЙКИ
@@ -22,6 +24,30 @@ SUPER_ADMIN_ID = int(os.environ.get('SUPER_ADMIN_ID', 6647021953))
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
+
+# Очередь для быстрого удаления сообщений
+delete_queue = queue.Queue()
+
+# ============================================
+# ПОТОК ДЛЯ БЫСТРОГО УДАЛЕНИЯ
+# ============================================
+def delete_worker():
+    """Фоновый поток для мгновенного удаления сообщений"""
+    while True:
+        try:
+            chat_id, message_id = delete_queue.get(timeout=1)
+            try:
+                bot.delete_message(chat_id, message_id)
+            except Exception as e:
+                print(f"Ошибка удаления: {e}")
+            finally:
+                delete_queue.task_done()
+        except queue.Empty:
+            time.sleep(0.01)  # Короткая пауза
+
+# Запускаем поток удаления
+delete_thread = threading.Thread(target=delete_worker, daemon=True)
+delete_thread.start()
 
 # ============================================
 # ПОДКЛЮЧЕНИЕ К POSTGRESQL
@@ -278,13 +304,10 @@ class Database:
             mute_until = result[0]
             now = datetime.now()
             
-            # Приводим к одинаковому формату времени
             if mute_until.tzinfo:
                 now = now.replace(tzinfo=mute_until.tzinfo)
             
             if now < mute_until:
-                remaining_seconds = int((mute_until - now).total_seconds())
-                print(f"🔇 Пользователь {user_id} в муте, осталось {remaining_seconds} сек")
                 return True
             else:
                 self.unmute_user(chat_id, user_id)
@@ -398,9 +421,8 @@ class AntiSpam:
         if db.is_group_admin(chat_id, user_id):
             return True, None
         
-        # ПРОВЕРКА НА МУТ - СРАЗУ ПОСЛЕ ПРОВЕРКИ НА АДМИНА
+        # ПРОВЕРКА НА МУТ
         if db.is_muted(chat_id, user_id):
-            print(f"🚫 Заблокировано сообщение от замученного {username}")
             return False, None  # Просто удаляем, без уведомления
         
         current_time = time.time()
@@ -513,6 +535,7 @@ def start(message):
 • Анти-мат (свой список)
 • Авто-мут после N варнов
 • Ручной мут (/mute)
+• ⚡ **МГНОВЕННОЕ УДАЛЕНИЕ**
 
 **👑 АДМИН КОМАНДЫ:**
 /functions - вкл/выкл функции
@@ -632,6 +655,7 @@ def settings_command(message):
 • Лимит варнов: {escape_md(settings['warn_limit'])}
 • Время мута: {escape_md(mute_minutes)} мин
 • Макс длина: {escape_md(settings['max_length'])} симв.
+• ⚡ Режим удаления: **МГНОВЕННЫЙ**
 • Статус: {'✅ Вкл' if settings['enabled'] else '❌ Выкл'}
 
 📝 **КОМАНДЫ ДЛЯ ИЗМЕНЕНИЯ:**
@@ -693,10 +717,8 @@ def mute_command(message):
         
         bot.reply_to(message, f"🔇 @{target_name} замучен на {minutes} мин!")
         
-        try:
-            bot.delete_message(chat_id, message.reply_to_message.message_id)
-        except:
-            pass
+        # Мгновенное удаление сообщения
+        delete_queue.put((chat_id, message.reply_to_message.message_id))
     except:
         bot.reply_to(message, "❌ Ошибка! Используй: /mute [минуты]")
 
@@ -1023,7 +1045,8 @@ def welcome_new(message):
                 "🦈 **SHARKYSPAM БОТ АКТИВИРОВАН!**\n"
                 "👑 /functions - управление\n"
                 "🔨 /mute - ручной мут\n"
-                "⚙️ /settings - настройки",
+                "⚙️ /settings - настройки\n"
+                "⚡ **МГНОВЕННОЕ УДАЛЕНИЕ СООБЩЕНИЙ**",
                 parse_mode='Markdown'
             )
             creator = message.from_user
@@ -1044,25 +1067,20 @@ def handle_message(message):
     
     is_allowed, warning = spam_filter.check_message(message)
     
-    if not is_allowed and warning:
-        try:
-            bot.delete_message(message.chat.id, message.message_id)
+    if not is_allowed:
+        # Мгновенное удаление через очередь
+        delete_queue.put((message.chat.id, message.message_id))
+        
+        # Если есть предупреждение, отправляем его
+        if warning:
             bot.send_message(message.chat.id, warning)
-        except:
-            pass
-    elif not is_allowed and warning is None:
-        # Если warning = None, просто удаляем сообщение без уведомления
-        try:
-            bot.delete_message(message.chat.id, message.message_id)
-        except:
-            pass
 
 # ============================================
 # ЗАПУСК НА RENDER
 # ============================================
 @app.route('/')
 def home():
-    return "🦈 SHARKYSPAM БОТ РАБОТАЕТ! 🔥", 200
+    return "🦈 SHARKYSPAM БОТ РАБОТАЕТ! ⚡ МГНОВЕННОЕ УДАЛЕНИЕ", 200
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
@@ -1086,11 +1104,12 @@ def set_webhook():
     bot.set_webhook(url=webhook_url)
     
     me = bot.get_me()
-    print(f"✅ Бот @{me.username} запущен!")
+    print(f"✅ Бот @{me.username} запущен! ⚡ Режим мгновенного удаления активен")
     return True
 
 if __name__ == '__main__':
     print("🔥 ЗАПУСК SHARKYSPAM БОТА")
+    print("⚡ Режим мгновенного удаления активирован")
     set_webhook()
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
