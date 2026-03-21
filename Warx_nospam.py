@@ -18,45 +18,37 @@ import queue
 # ============================================
 TOKEN = os.environ.get('BOT_TOKEN')
 if not TOKEN:
-    raise ValueError("❌ Нет токена! Добавь BOT_TOKEN в переменные окружения!")
+    raise ValueError("❌ Нет токена!")
 
 SUPER_ADMIN_ID = int(os.environ.get('SUPER_ADMIN_ID', 6647021953))
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# Очередь для быстрого удаления сообщений
+# Очередь для быстрого удаления
 delete_queue = queue.Queue()
 
-# ============================================
-# ПОТОК ДЛЯ БЫСТРОГО УДАЛЕНИЯ
-# ============================================
 def delete_worker():
-    """Фоновый поток для мгновенного удаления сообщений"""
     while True:
         try:
             chat_id, message_id = delete_queue.get(timeout=1)
             try:
                 bot.delete_message(chat_id, message_id)
-            except Exception as e:
-                print(f"Ошибка удаления: {e}")
-            finally:
-                delete_queue.task_done()
+            except:
+                pass
+            delete_queue.task_done()
         except queue.Empty:
-            time.sleep(0.01)  # Короткая пауза
+            time.sleep(0.01)
 
-# Запускаем поток удаления
-delete_thread = threading.Thread(target=delete_worker, daemon=True)
-delete_thread.start()
+threading.Thread(target=delete_worker, daemon=True).start()
 
 # ============================================
 # ПОДКЛЮЧЕНИЕ К POSTGRESQL
 # ============================================
 def get_db_connection():
-    """Создает подключение к PostgreSQL"""
     db_url = os.environ.get('DATABASE_URL')
     if not db_url:
-        raise ValueError("❌ Нет DATABASE_URL в переменных окружения!")
+        raise ValueError("❌ Нет DATABASE_URL!")
     
     result = urlparse(db_url)
     conn = psycopg2.connect(
@@ -77,10 +69,9 @@ class Database:
         self.conn = get_db_connection()
         self.cursor = self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         self.create_tables()
-        print("✅ База данных PostgreSQL подключена")
+        print("✅ PostgreSQL подключена")
     
     def create_tables(self):
-        # Таблица настроек групп
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_settings (
                 chat_id BIGINT PRIMARY KEY,
@@ -98,12 +89,10 @@ class Database:
                 link_kd INTEGER DEFAULT 10,
                 warn_limit INTEGER DEFAULT 5,
                 auto_mute BOOLEAN DEFAULT TRUE,
-                mute_time INTEGER DEFAULT 60,
-                max_length INTEGER DEFAULT 1000
+                mute_time INTEGER DEFAULT 60
             )
         ''')
         
-        # Таблица админов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS group_admins (
                 chat_id BIGINT,
@@ -115,7 +104,6 @@ class Database:
             )
         ''')
         
-        # Таблица нарушителей
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS offenders (
                 chat_id BIGINT,
@@ -130,7 +118,6 @@ class Database:
             )
         ''')
         
-        # Таблица запрещенных слов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS ban_words (
                 chat_id BIGINT,
@@ -140,7 +127,6 @@ class Database:
             )
         ''')
         
-        # Таблица логов
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS logs (
                 id SERIAL PRIMARY KEY,
@@ -153,7 +139,6 @@ class Database:
             )
         ''')
         
-        # Таблица приветствий
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS greetings (
                 chat_id BIGINT PRIMARY KEY,
@@ -167,14 +152,9 @@ class Database:
     def get_group_settings(self, chat_id):
         self.cursor.execute('SELECT * FROM group_settings WHERE chat_id = %s', (chat_id,))
         result = self.cursor.fetchone()
-        
         if not result:
-            self.cursor.execute('''
-                INSERT INTO group_settings (chat_id) 
-                VALUES (%s) RETURNING *
-            ''', (chat_id,))
+            self.cursor.execute('INSERT INTO group_settings (chat_id) VALUES (%s) RETURNING *', (chat_id,))
             result = self.cursor.fetchone()
-        
         return dict(result)
     
     def update_setting(self, chat_id, setting, value):
@@ -228,7 +208,6 @@ class Database:
         self.conn.commit()
     
     def add_warn(self, chat_id, user_id, username, reason):
-        # Получаем текущие данные нарушителя
         self.cursor.execute('SELECT * FROM offenders WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
         offender = self.cursor.fetchone()
         settings = self.get_group_settings(chat_id)
@@ -254,10 +233,8 @@ class Database:
         
         if settings['auto_mute'] and new_warns >= settings['warn_limit']:
             mute_until = datetime.now() + timedelta(seconds=settings['mute_time'])
-            self.cursor.execute('''
-                UPDATE offenders SET muted_until = %s 
-                WHERE chat_id = %s AND user_id = %s
-            ''', (mute_until, chat_id, user_id))
+            self.cursor.execute('UPDATE offenders SET muted_until = %s WHERE chat_id = %s AND user_id = %s', 
+                              (mute_until, chat_id, user_id))
             self.conn.commit()
             return new_warns, mute_until
         
@@ -279,17 +256,13 @@ class Database:
         
         self.log_action(chat_id, user_id, username, 'MUTE', f"{reason} на {minutes} мин")
         self.conn.commit()
-        print(f"✅ Пользователь {username} замучен до {mute_until}")
         return mute_until
     
     def unmute_user(self, chat_id, user_id):
-        self.cursor.execute('''
-            UPDATE offenders SET muted_until = NULL 
-            WHERE chat_id = %s AND user_id = %s
-        ''', (chat_id, user_id))
+        self.cursor.execute('UPDATE offenders SET muted_until = NULL WHERE chat_id = %s AND user_id = %s', 
+                          (chat_id, user_id))
         self.log_action(chat_id, user_id, "unknown", 'UNMUTE', "Снятие мута")
         self.conn.commit()
-        print(f"✅ Пользователь {user_id} размучен")
     
     def get_offender(self, chat_id, user_id):
         self.cursor.execute('SELECT * FROM offenders WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
@@ -299,15 +272,9 @@ class Database:
     def is_muted(self, chat_id, user_id):
         self.cursor.execute('SELECT muted_until FROM offenders WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
         result = self.cursor.fetchone()
-        
         if result and result[0]:
             mute_until = result[0]
-            now = datetime.now()
-            
-            if mute_until.tzinfo:
-                now = now.replace(tzinfo=mute_until.tzinfo)
-            
-            if now < mute_until:
+            if datetime.now() < mute_until:
                 return True
             else:
                 self.unmute_user(chat_id, user_id)
@@ -315,10 +282,8 @@ class Database:
         return False
     
     def reset_warns(self, chat_id, user_id):
-        self.cursor.execute('''
-            UPDATE offenders SET warns = 0 
-            WHERE chat_id = %s AND user_id = %s
-        ''', (chat_id, user_id))
+        self.cursor.execute('UPDATE offenders SET warns = 0 WHERE chat_id = %s AND user_id = %s', 
+                          (chat_id, user_id))
         self.unmute_user(chat_id, user_id)
         self.conn.commit()
     
@@ -421,9 +386,8 @@ class AntiSpam:
         if db.is_group_admin(chat_id, user_id):
             return True, None
         
-        # ПРОВЕРКА НА МУТ
         if db.is_muted(chat_id, user_id):
-            return False, None  # Просто удаляем, без уведомления
+            return False, None
         
         current_time = time.time()
         key = f"{chat_id}:{user_id}"
@@ -433,8 +397,7 @@ class AntiSpam:
         
         self.user_messages[key] = [msg for msg in self.user_messages[key] if current_time - msg['time'] < 60]
         
-        if len(text) > settings['max_length']:
-            return False, f"⚠️ **СЛИШКОМ ДЛИННО!** Макс: {settings['max_length']} симв."
+        # ПРОВЕРКА НА ДЛИНУ УДАЛЕНА!
         
         if settings['flood_enabled']:
             recent = [msg for msg in self.user_messages[key] if current_time - msg['time'] < settings['time_window']]
@@ -519,7 +482,7 @@ def get_username(user):
     return user.username or user.first_name or f"user_{user.id}"
 
 # ============================================
-# КОМАНДЫ БОТА
+# КОМАНДЫ
 # ============================================
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -534,15 +497,14 @@ def start(message):
 • Анти-ссылки для новичков
 • Анти-мат (свой список)
 • Авто-мут после N варнов
-• Ручной мут (/mute)
-• ⚡ **МГНОВЕННОЕ УДАЛЕНИЕ**
+• Ручной мут (/silence)
 
 **👑 АДМИН КОМАНДЫ:**
 /functions - вкл/выкл функции
 /settings - настройки группы
 /logs - логи нарушений
-/mute [мин] - замутить (ответом)
-/unmute - размутить (ответом)
+/silence [мин] - замутить (ответом)
+/unsilence - размутить (ответом)
 /add_admin - добавить админа
 /remove_admin - удалить админа
 /admins - список админов
@@ -560,7 +522,6 @@ def start(message):
 /set_link_kd - задержка для ссылок (мин)
 /set_warn_limit - лимит предупреждений
 /set_mute_time - время мута (мин)
-/set_max_len - макс длина сообщения
 /check_mute - проверить статус мута
     """
     bot.reply_to(message, text, parse_mode='Markdown')
@@ -569,9 +530,59 @@ def start(message):
 def help_command(message):
     start(message)
 
+@bot.message_handler(commands=['silence'])
+def silence_command(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
+        return
+    
+    try:
+        parts = message.text.split()
+        minutes = 1 if len(parts) < 2 else max(1, min(int(parts[1]), 1440))
+        
+        target = message.reply_to_message.from_user
+        target_name = get_username(target)
+        
+        mute_until = db.mute_user(chat_id, target.id, target_name, minutes,
+                                  f"Ручной мут от @{get_username(message.from_user)}")
+        
+        delete_queue.put((chat_id, message.message_id))
+        delete_queue.put((chat_id, message.reply_to_message.message_id))
+        
+        bot.send_message(chat_id, f"🔇 @{target_name} замучен на {minutes} мин!")
+        
+    except:
+        bot.reply_to(message, "❌ Ошибка! Используй: /silence [минуты]")
+
+@bot.message_handler(commands=['unsilence'])
+def unsilence_command(message):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    
+    if not is_admin(chat_id, user_id):
+        bot.reply_to(message, "❌ Только админы!")
+        return
+    
+    if not message.reply_to_message:
+        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
+        return
+    
+    target = message.reply_to_message.from_user
+    db.unmute_user(chat_id, target.id)
+    
+    delete_queue.put((chat_id, message.message_id))
+    
+    bot.send_message(chat_id, f"✅ @{get_username(target)} размучен!")
+
 @bot.message_handler(commands=['check_mute'])
 def check_mute(message):
-    """Проверить статус мута (только для админов)"""
     chat_id = message.chat.id
     user_id = message.from_user.id
     
@@ -588,19 +599,13 @@ def check_mute(message):
     
     if offender and offender['muted_until']:
         mute_until = offender['muted_until']
-        now = datetime.now()
-        
-        if mute_until.tzinfo:
-            now = now.replace(tzinfo=mute_until.tzinfo)
-        
-        remaining_seconds = int((mute_until - now).total_seconds())
+        remaining_seconds = int((mute_until - datetime.now()).total_seconds())
         remaining_minutes = remaining_seconds / 60
         
         bot.reply_to(message, 
             f"🔇 Статус @{get_username(target)}:\n"
             f"Мут до: {mute_until}\n"
-            f"Осталось секунд: {remaining_seconds}\n"
-            f"Осталось минут: {remaining_minutes:.2f}\n"
+            f"Осталось: {remaining_seconds} сек ({remaining_minutes:.2f} мин)\n"
             f"Причина: {offender.get('last_reason', 'неизвестно')}")
     else:
         bot.reply_to(message, f"✅ @{get_username(target)} не в муте")
@@ -654,8 +659,7 @@ def settings_command(message):
 • Ссылки: кд {escape_md(settings['link_kd'])} мин
 • Лимит варнов: {escape_md(settings['warn_limit'])}
 • Время мута: {escape_md(mute_minutes)} мин
-• Макс длина: {escape_md(settings['max_length'])} симв.
-• ⚡ Режим удаления: **МГНОВЕННЫЙ**
+• Длина сообщения: ❌ НЕ ПРОВЕРЯЕТСЯ
 • Статус: {'✅ Вкл' if settings['enabled'] else '❌ Выкл'}
 
 📝 **КОМАНДЫ ДЛЯ ИЗМЕНЕНИЯ:**
@@ -666,7 +670,6 @@ def settings_command(message):
 /set_link_kd [0-60]
 /set_warn_limit [1-10]
 /set_mute_time [1-60] (МИНУТЫ)
-/set_max_len [10-5000]
 /greeting [текст]
     """
     bot.reply_to(message, text, parse_mode='Markdown')
@@ -680,64 +683,51 @@ def logs_command(message):
         bot.reply_to(message, "❌ Только админы!")
         return
     
-    logs = db.get_logs(chat_id, 10)
-    if not logs:
-        bot.reply_to(message, "📝 Логов пока нет")
-        return
-    
-    text = "📋 **ПОСЛЕДНИЕ ДЕЙСТВИЯ:**\n\n"
-    for log in logs:
-        emoji = "⚠️" if log['action'] == 'WARN' else "🔇" if log['action'] == 'MUTE' else "✅"
-        text += f"{emoji} @{log['username']}: {log['reason']}\n   🕒 {log['timestamp'].strftime('%Y-%m-%d %H:%M') if log['timestamp'] else 'неизвестно'}\n\n"
-    
-    bot.reply_to(message, text, parse_mode='Markdown')
-
-@bot.message_handler(commands=['mute'])
-def mute_command(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    if not is_admin(chat_id, user_id):
-        bot.reply_to(message, "❌ Только админы!")
-        return
-    
-    if not message.reply_to_message:
-        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
-        return
-    
     try:
-        parts = message.text.split()
-        minutes = 1 if len(parts) < 2 else max(1, min(int(parts[1]), 1440))
+        logs = db.get_logs(chat_id, 15)
         
-        target = message.reply_to_message.from_user
-        target_name = get_username(target)
+        if not logs:
+            bot.reply_to(message, "📝 **Логов пока нет**\n\nНарушения будут появляться здесь по мере работы бота.")
+            return
         
-        mute_until = db.mute_user(chat_id, target.id, target_name, minutes, 
-                                  f"Ручной мут от @{get_username(message.from_user)}")
+        text = "📋 **ПОСЛЕДНИЕ ДЕЙСТВИЯ:**\n\n"
+        for log in logs:
+            username = log.get('username', 'Неизвестно')
+            action = log.get('action', '')
+            reason = log.get('reason', 'Нет причины')
+            timestamp = log.get('timestamp')
+            
+            if action == 'WARN':
+                emoji = "⚠️"
+                action_text = "ПРЕДУПРЕЖДЕНИЕ"
+            elif action == 'MUTE':
+                emoji = "🔇"
+                action_text = "МУТ"
+            elif action == 'UNMUTE':
+                emoji = "✅"
+                action_text = "РАЗМУТ"
+            else:
+                emoji = "📌"
+                action_text = action
+            
+            if timestamp:
+                time_str = timestamp.strftime('%d.%m.%Y %H:%M')
+            else:
+                time_str = "неизвестно"
+            
+            text += f"{emoji} **{action_text}**\n"
+            text += f"   👤 @{username}\n"
+            text += f"   📝 {reason}\n"
+            text += f"   🕒 {time_str}\n\n"
         
-        bot.reply_to(message, f"🔇 @{target_name} замучен на {minutes} мин!")
+        # Если текст слишком длинный, обрезаем
+        if len(text) > 4000:
+            text = text[:4000] + "\n\n... (лог обрезан)"
         
-        # Мгновенное удаление сообщения
-        delete_queue.put((chat_id, message.reply_to_message.message_id))
-    except:
-        bot.reply_to(message, "❌ Ошибка! Используй: /mute [минуты]")
-
-@bot.message_handler(commands=['unmute'])
-def unmute_command(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    
-    if not is_admin(chat_id, user_id):
-        bot.reply_to(message, "❌ Только админы!")
-        return
-    
-    if not message.reply_to_message:
-        bot.reply_to(message, "❌ Ответь на сообщение пользователя!")
-        return
-    
-    target = message.reply_to_message.from_user
-    db.unmute_user(chat_id, target.id)
-    bot.reply_to(message, f"✅ @{get_username(target)} размучен!")
+        bot.reply_to(message, text, parse_mode='Markdown')
+        
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка при получении логов: {e}")
 
 @bot.message_handler(commands=['add_admin'])
 def add_admin(message):
@@ -997,21 +987,6 @@ def set_mute_time(message):
     except:
         bot.reply_to(message, "❌ /set_mute_time [1-60] (МИНУТЫ)")
 
-@bot.message_handler(commands=['set_max_len'])
-def set_max_len(message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-    if not is_admin(chat_id, user_id): 
-        bot.reply_to(message, "❌ Только админы!")
-        return
-    try:
-        val = int(message.text.split()[1])
-        if 10 <= val <= 5000:
-            db.update_setting(chat_id, 'max_length', val)
-            bot.reply_to(message, f"✅ Макс длина: {val} симв.")
-    except:
-        bot.reply_to(message, "❌ /set_max_len [10-5000]")
-
 # ============================================
 # CALLBACK HANDLERS
 # ============================================
@@ -1044,9 +1019,9 @@ def welcome_new(message):
             bot.reply_to(message, 
                 "🦈 **SHARKYSPAM БОТ АКТИВИРОВАН!**\n"
                 "👑 /functions - управление\n"
-                "🔨 /mute - ручной мут\n"
+                "🔨 /silence - ручной мут\n"
                 "⚙️ /settings - настройки\n"
-                "⚡ **МГНОВЕННОЕ УДАЛЕНИЕ СООБЩЕНИЙ**",
+                "✅ Длина сообщений НЕ ПРОВЕРЯЕТСЯ",
                 parse_mode='Markdown'
             )
             creator = message.from_user
@@ -1068,10 +1043,7 @@ def handle_message(message):
     is_allowed, warning = spam_filter.check_message(message)
     
     if not is_allowed:
-        # Мгновенное удаление через очередь
         delete_queue.put((message.chat.id, message.message_id))
-        
-        # Если есть предупреждение, отправляем его
         if warning:
             bot.send_message(message.chat.id, warning)
 
@@ -1080,7 +1052,7 @@ def handle_message(message):
 # ============================================
 @app.route('/')
 def home():
-    return "🦈 SHARKYSPAM БОТ РАБОТАЕТ! ⚡ МГНОВЕННОЕ УДАЛЕНИЕ", 200
+    return "🦈 SHARKYSPAM БОТ РАБОТАЕТ! ✅ ДЛИНА НЕ ПРОВЕРЯЕТСЯ", 200
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
@@ -1104,12 +1076,12 @@ def set_webhook():
     bot.set_webhook(url=webhook_url)
     
     me = bot.get_me()
-    print(f"✅ Бот @{me.username} запущен! ⚡ Режим мгновенного удаления активен")
+    print(f"✅ Бот @{me.username} запущен! Длина сообщений НЕ ПРОВЕРЯЕТСЯ")
     return True
 
 if __name__ == '__main__':
     print("🔥 ЗАПУСК SHARKYSPAM БОТА")
-    print("⚡ Режим мгновенного удаления активирован")
+    print("✅ Проверка длины сообщений ОТКЛЮЧЕНА")
     set_webhook()
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
