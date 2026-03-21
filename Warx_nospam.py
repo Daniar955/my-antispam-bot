@@ -256,6 +256,7 @@ class Database:
         
         self.log_action(chat_id, user_id, username, 'MUTE', f"{reason} на {minutes} мин")
         self.conn.commit()
+        print(f"✅ Пользователь {username} замучен до {mute_until}")
         return mute_until
     
     def unmute_user(self, chat_id, user_id):
@@ -263,6 +264,7 @@ class Database:
                           (chat_id, user_id))
         self.log_action(chat_id, user_id, "unknown", 'UNMUTE', "Снятие мута")
         self.conn.commit()
+        print(f"✅ Пользователь {user_id} размучен")
     
     def get_offender(self, chat_id, user_id):
         self.cursor.execute('SELECT * FROM offenders WHERE chat_id = %s AND user_id = %s', (chat_id, user_id))
@@ -386,6 +388,7 @@ class AntiSpam:
         if db.is_group_admin(chat_id, user_id):
             return True, None
         
+        # ПРОВЕРКА НА МУТ
         if db.is_muted(chat_id, user_id):
             return False, None
         
@@ -528,6 +531,9 @@ def start(message):
 def help_command(message):
     start(message)
 
+# ============================================
+# КОМАНДА /silence (МУТ)
+# ============================================
 @bot.message_handler(commands=['silence'])
 def silence_command(message):
     chat_id = message.chat.id
@@ -543,11 +549,19 @@ def silence_command(message):
     
     try:
         parts = message.text.split()
-        minutes = 1 if len(parts) < 2 else max(1, min(int(parts[1]), 1440))
+        if len(parts) < 2:
+            minutes = 1
+        else:
+            minutes = int(parts[1])
+            if minutes < 1:
+                minutes = 1
+            if minutes > 1440:
+                minutes = 1440
         
         target = message.reply_to_message.from_user
         target_name = get_username(target)
         
+        # ВЫЗЫВАЕМ ФУНКЦИЮ МУТА
         mute_until = db.mute_user(chat_id, target.id, target_name, minutes,
                                   f"Ручной мут от @{get_username(message.from_user)}")
         
@@ -565,9 +579,14 @@ def silence_command(message):
         
         bot.send_message(chat_id, f"🔇 @{target_name} замучен на {minutes} мин!")
         
+    except ValueError:
+        bot.reply_to(message, "❌ Ошибка! Используй: /silence [минуты]\nПример: /silence 5")
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка! Используй: /silence [минуты]")
+        bot.reply_to(message, f"❌ Ошибка: {e}")
 
+# ============================================
+# КОМАНДА /unsilence (РАЗМУТ)
+# ============================================
 @bot.message_handler(commands=['unsilence'])
 def unsilence_command(message):
     chat_id = message.chat.id
@@ -591,6 +610,9 @@ def unsilence_command(message):
     
     bot.send_message(chat_id, f"✅ @{get_username(target)} размучен!")
 
+# ============================================
+# КОМАНДА /check_mute (ПРОВЕРКА МУТА)
+# ============================================
 @bot.message_handler(commands=['check_mute'])
 def check_mute(message):
     chat_id = message.chat.id
@@ -620,6 +642,9 @@ def check_mute(message):
     else:
         bot.reply_to(message, f"✅ @{get_username(target)} не в муте")
 
+# ============================================
+# КОМАНДА /functions
+# ============================================
 @bot.message_handler(commands=['functions'])
 def functions_menu(message):
     chat_id = message.chat.id
@@ -644,6 +669,9 @@ def functions_menu(message):
     
     bot.reply_to(message, "🔧 **УПРАВЛЕНИЕ ФУНКЦИЯМИ**\nНажми чтобы вкл/выкл:", reply_markup=markup, parse_mode='Markdown')
 
+# ============================================
+# КОМАНДА /settings
+# ============================================
 @bot.message_handler(commands=['settings'])
 def settings_command(message):
     chat_id = message.chat.id
@@ -683,6 +711,9 @@ def settings_command(message):
     """
     bot.reply_to(message, text, parse_mode='Markdown')
 
+# ============================================
+# КОМАНДА /logs
+# ============================================
 @bot.message_handler(commands=['logs'])
 def logs_command(message):
     chat_id = message.chat.id
@@ -737,6 +768,9 @@ def logs_command(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Ошибка при получении логов: {e}")
 
+# ============================================
+# КОМАНДЫ ДЛЯ АДМИНОВ
+# ============================================
 @bot.message_handler(commands=['add_admin'])
 def add_admin(message):
     chat_id = message.chat.id
