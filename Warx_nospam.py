@@ -397,8 +397,6 @@ class AntiSpam:
         
         self.user_messages[key] = [msg for msg in self.user_messages[key] if current_time - msg['time'] < 60]
         
-        # ПРОВЕРКА НА ДЛИНУ УДАЛЕНА!
-        
         if settings['flood_enabled']:
             recent = [msg for msg in self.user_messages[key] if current_time - msg['time'] < settings['time_window']]
             if len(recent) >= settings['max_messages']:
@@ -482,7 +480,7 @@ def get_username(user):
     return user.username or user.first_name or f"user_{user.id}"
 
 # ============================================
-# КОМАНДЫ
+# КОМАНДЫ БОТА
 # ============================================
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -553,13 +551,22 @@ def silence_command(message):
         mute_until = db.mute_user(chat_id, target.id, target_name, minutes,
                                   f"Ручной мут от @{get_username(message.from_user)}")
         
-        delete_queue.put((chat_id, message.message_id))
-        delete_queue.put((chat_id, message.reply_to_message.message_id))
+        # Удаляем сообщение с командой
+        try:
+            bot.delete_message(chat_id, message.message_id)
+        except:
+            pass
+        
+        # Удаляем сообщение нарушителя
+        try:
+            bot.delete_message(chat_id, message.reply_to_message.message_id)
+        except:
+            pass
         
         bot.send_message(chat_id, f"🔇 @{target_name} замучен на {minutes} мин!")
         
-    except:
-        bot.reply_to(message, "❌ Ошибка! Используй: /silence [минуты]")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Ошибка! Используй: /silence [минуты]")
 
 @bot.message_handler(commands=['unsilence'])
 def unsilence_command(message):
@@ -577,7 +584,10 @@ def unsilence_command(message):
     target = message.reply_to_message.from_user
     db.unmute_user(chat_id, target.id)
     
-    delete_queue.put((chat_id, message.message_id))
+    try:
+        bot.delete_message(chat_id, message.message_id)
+    except:
+        pass
     
     bot.send_message(chat_id, f"✅ @{get_username(target)} размучен!")
 
@@ -659,7 +669,6 @@ def settings_command(message):
 • Ссылки: кд {escape_md(settings['link_kd'])} мин
 • Лимит варнов: {escape_md(settings['warn_limit'])}
 • Время мута: {escape_md(mute_minutes)} мин
-• Длина сообщения: ❌ НЕ ПРОВЕРЯЕТСЯ
 • Статус: {'✅ Вкл' if settings['enabled'] else '❌ Выкл'}
 
 📝 **КОМАНДЫ ДЛЯ ИЗМЕНЕНИЯ:**
@@ -720,7 +729,6 @@ def logs_command(message):
             text += f"   📝 {reason}\n"
             text += f"   🕒 {time_str}\n\n"
         
-        # Если текст слишком длинный, обрезаем
         if len(text) > 4000:
             text = text[:4000] + "\n\n... (лог обрезан)"
         
@@ -881,7 +889,6 @@ def antispam_off(message):
     db.update_setting(chat_id, 'enabled', False)
     bot.reply_to(message, "🔴 **АНТИСПАМ ВЫКЛЮЧЕН!**", parse_mode='Markdown')
 
-# Настройки параметров
 @bot.message_handler(commands=['set_max_msgs'])
 def set_max_msgs(message):
     chat_id = message.chat.id
@@ -1020,8 +1027,7 @@ def welcome_new(message):
                 "🦈 **SHARKYSPAM БОТ АКТИВИРОВАН!**\n"
                 "👑 /functions - управление\n"
                 "🔨 /silence - ручной мут\n"
-                "⚙️ /settings - настройки\n"
-                "✅ Длина сообщений НЕ ПРОВЕРЯЕТСЯ",
+                "⚙️ /settings - настройки",
                 parse_mode='Markdown'
             )
             creator = message.from_user
@@ -1052,7 +1058,7 @@ def handle_message(message):
 # ============================================
 @app.route('/')
 def home():
-    return "🦈 SHARKYSPAM БОТ РАБОТАЕТ! ✅ ДЛИНА НЕ ПРОВЕРЯЕТСЯ", 200
+    return "🦈 SHARKYSPAM БОТ РАБОТАЕТ! 🔥", 200
 
 @app.route(f'/{TOKEN}', methods=['POST'])
 def webhook():
@@ -1076,12 +1082,11 @@ def set_webhook():
     bot.set_webhook(url=webhook_url)
     
     me = bot.get_me()
-    print(f"✅ Бот @{me.username} запущен! Длина сообщений НЕ ПРОВЕРЯЕТСЯ")
+    print(f"✅ Бот @{me.username} запущен!")
     return True
 
 if __name__ == '__main__':
     print("🔥 ЗАПУСК SHARKYSPAM БОТА")
-    print("✅ Проверка длины сообщений ОТКЛЮЧЕНА")
     set_webhook()
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
