@@ -712,13 +712,25 @@ def mute_command(message):
         target = message.reply_to_message.from_user
         target_name = get_username(target)
         
-        mute_until = db.mute_user(chat_id, target.id, target_name, minutes, 
+        # Мутим
+        mute_until = db.mute_user(chat_id, target.id, target_name, minutes,
                                   f"Ручной мут от @{get_username(message.from_user)}")
         
-        bot.reply_to(message, f"🔇 @{target_name} замучен на {minutes} мин!")
+        # Удаляем сообщение с командой
+        try:
+            bot.delete_message(chat_id, message.message_id)
+        except:
+            pass
         
-        # Мгновенное удаление сообщения
-        delete_queue.put((chat_id, message.reply_to_message.message_id))
+        # Удаляем сообщение нарушителя
+        try:
+            bot.delete_message(chat_id, message.reply_to_message.message_id)
+        except:
+            pass
+        
+        # Уведомление
+        bot.send_message(chat_id, f"🔇 @{target_name} замучен на {minutes} мин!")
+        
     except:
         bot.reply_to(message, "❌ Ошибка! Используй: /mute [минуты]")
 
